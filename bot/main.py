@@ -20,6 +20,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Audio queue
 queue = []
 
+# Audio history
+playback_history = []
+
 # Get audio function
 def get_audio_stream_url(url):
     try:
@@ -75,20 +78,21 @@ async def play_audio(ctx, stream_url, title, video_url):
     vc.play(source, after=lambda e: after_playing(e))
     await ctx.send(f"I'm playing: **{title}**\n{video_url}")
 
-# Help command
-# ...existing code...
-
+    # Add to history
+    playback_history.append({'title': title, 'video_url': video_url})
+    
 # Command to display custom help message
 @bot.command(name='djhelp')
 async def custom_help(ctx):
     help_message = """
 **PakoDJ Bot Commands:**
-- `!play` - Plays a song searched by keywords or link (if a song is currently playing, adds the searched song in a queue).
-- `!skip` - Stops the current song and plays the next one in the queue.
-- `!pause` - Pauses the currently playing track.
-- `!resume` - Resumes the paused track.
-- `!viewQueue` - Shows the tracks that are queued.
-- `!stop` - Stops the playback and disconnects the bot from the voice channel.
+- `!play` - Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).
+- `!skip` - Stops current audio track and plays the next one in the queue.
+- `!pause` - Pauses currently playing audio track.
+- `!resume` - Resumes paused audio track.
+- `!queue` - Shows queued audio tracks.
+- `!history` - Shows previously played audio tracks.
+- `!stop` - Stops playback and disconnects bot from voice channel.
     """
     await ctx.send(help_message)
 
@@ -150,7 +154,7 @@ async def resume(ctx):
         await ctx.send("No paused track.")
 
 @bot.command()
-async def viewQueue(ctx):
+async def queue(ctx):
     if queue:
         queue_message = "**Queue:**\n"
         for i, track in enumerate(queue, 1):
@@ -158,6 +162,17 @@ async def viewQueue(ctx):
         await ctx.send(queue_message)
     else:
         await ctx.send("Queue's empty.")
+
+# Command to show previosly played audio tracks
+@bot.command()
+async def history(ctx):
+    if playback_history:
+        history_message = "**Playback History:**\n"
+        for i, track in enumerate(playback_history, 1):
+            history_message += f"{i}. {track['title']} ({track['video_url']})\n"
+        await ctx.send(history_message)
+    else:
+        await ctx.send("No tracks have been played yet.")
 
 # Command to stop playback and disconnect PakoDJ
 @bot.command()
