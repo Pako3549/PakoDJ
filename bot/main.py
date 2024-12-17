@@ -17,6 +17,9 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# current track
+current_track = None
+
 # Audio queue
 audio_queue = []
 
@@ -66,7 +69,6 @@ def after_playing(error):
         next_track = audio_queue.pop(0)
         asyncio.run_coroutine_threadsafe(play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url']), bot.loop)
 
-# Audio reproduction
 async def play_audio(ctx, stream_url, title, video_url):
     vc = ctx.voice_client
     if vc is None:
@@ -81,6 +83,18 @@ async def play_audio(ctx, stream_url, title, video_url):
     # Add to history
     playback_history.append({'title': title, 'video_url': video_url})
 
+    # Set current track
+    global current_track
+    current_track = {'title': title, 'video_url': video_url}
+
+# Command to display current audio track
+@bot.command()
+async def track(ctx):
+    if current_track:
+        await ctx.send(f"Current track: **{current_track['title']}**\n{current_track['video_url']}")
+    else:
+        await ctx.send("No track is currently playing.")
+
 # Command to display custom help message
 @bot.command(name='djhelp')
 async def custom_help(ctx):
@@ -90,6 +104,7 @@ async def custom_help(ctx):
 - `!skip` - Stops current audio track and plays the next one in the queue.
 - `!pause` - Pauses currently playing audio track.
 - `!resume` - Resumes paused audio track.
+- `!track` - Shows current audio track.
 - `!queue` - Shows queued audio tracks.
 - `!history` - Shows previously played audio tracks.
 - `!stop` - Stops playback and disconnects bot from voice channel.
