@@ -18,7 +18,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Audio queue
-queue = []
+audio_queue = []
 
 # Audio history
 playback_history = []
@@ -62,8 +62,8 @@ def search_youtube(query):
 def after_playing(error):
     if error:
         print(f"Error during playback: {error}")
-    if queue:
-        next_track = queue.pop(0)
+    if audio_queue:
+        next_track = audio_queue.pop(0)
         asyncio.run_coroutine_threadsafe(play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url']), bot.loop)
 
 # Audio reproduction
@@ -80,7 +80,7 @@ async def play_audio(ctx, stream_url, title, video_url):
 
     # Add to history
     playback_history.append({'title': title, 'video_url': video_url})
-    
+
 # Command to display custom help message
 @bot.command(name='djhelp')
 async def custom_help(ctx):
@@ -112,7 +112,7 @@ async def play(ctx, *, query: str):
                 return
 
             if ctx.voice_client and ctx.voice_client.is_playing():
-                queue.append({'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url})
+                audio_queue.append({'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url})
                 await ctx.send(f"Track added to queue: **{title}**\n{video_url}")
             else:
                 await play_audio(ctx, stream_url, title, video_url)
@@ -127,8 +127,8 @@ async def play(ctx, *, query: str):
 async def skip(ctx):
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.stop()
-        if queue:
-            next_track = queue.pop(0)
+        if audio_queue:
+            next_track = audio_queue.pop(0)
             await play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url'])
         else:
             await ctx.send("Queue's empty. No track to play.")
@@ -155,9 +155,9 @@ async def resume(ctx):
 
 @bot.command()
 async def queue(ctx):
-    if queue:
+    if audio_queue:
         queue_message = "**Queue:**\n"
-        for i, track in enumerate(queue, 1):
+        for i, track in enumerate(audio_queue, 1):
             queue_message += f"{i}. {track['title']} ({track['video_url']})\n"
         await ctx.send(queue_message)
     else:
