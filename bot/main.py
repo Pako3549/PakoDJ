@@ -2,6 +2,7 @@ import os
 import discord
 from discord.ext import commands
 import yt_dlp
+import re
 import asyncio
 from discord import FFmpegPCMAudio
 from dotenv import load_dotenv
@@ -22,12 +23,17 @@ queue = []
 # Get audio function
 def get_audio_stream_url(url):
     try:
+        # Remove additional parameters from the URL
+        url = re.sub(r'&.*', '', url)
+        
         ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            if info is None:
+                raise ValueError("No information retrieved from URL")
             return info['url'], info['title'], info['webpage_url']
     except Exception as e:
         print(f"Error retrieving audio stream: {e}")
