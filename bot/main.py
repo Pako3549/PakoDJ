@@ -88,7 +88,7 @@ async def play_audio(ctx, stream_url, title, video_url):
     current_track = {'title': title, 'video_url': video_url}
 
 # Command to display current audio track
-@bot.command()
+@bot.command(help = "Shows current audio track.")
 async def track(ctx):
     if current_track:
         await ctx.send(f"Current track: **{current_track['title']}**\n{current_track['video_url']}")
@@ -96,7 +96,7 @@ async def track(ctx):
         await ctx.send("No track is currently playing.")
 
 # Command to display custom help message
-@bot.command(name='djhelp')
+@bot.command(name='djhelp', help = "Lists all commands for PakoDJ.")
 async def custom_help(ctx):
     help_message = """
 **PakoDJ Bot Commands:**
@@ -112,7 +112,7 @@ async def custom_help(ctx):
     await ctx.send(help_message)
 
 # Command to reproduce audio
-@bot.command()
+@bot.command(help = "Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).")
 async def play(ctx, *, query: str):
     try:
         if ctx.author.voice:
@@ -138,7 +138,7 @@ async def play(ctx, *, query: str):
         print(f"Error: {e}")
 
 # Command to skip current track
-@bot.command()
+@bot.command(help = "Stops current audio track and plays the next one in the queue.")
 async def skip(ctx):
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.stop()
@@ -151,7 +151,7 @@ async def skip(ctx):
         await ctx.send("No track playing.")
 
 # Command to pause current track
-@bot.command()
+@bot.command(help = "Pauses currently playing audio track.")
 async def pause(ctx):
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.pause()
@@ -160,7 +160,7 @@ async def pause(ctx):
         await ctx.send("No track playing.")
 
 # Command to resume current track
-@bot.command()
+@bot.command(help = "Resumes paused audio track.")
 async def resume(ctx):
     if ctx.voice_client and ctx.voice_client.is_paused():
         ctx.voice_client.resume()
@@ -168,7 +168,7 @@ async def resume(ctx):
     else:
         await ctx.send("No paused track.")
 
-@bot.command()
+@bot.command(help = "Shows queued audio tracks.")
 async def queue(ctx):
     if audio_queue:
         queue_message = "**Queue:**\n"
@@ -179,7 +179,7 @@ async def queue(ctx):
         await ctx.send("Queue's empty.")
 
 # Command to show previosly played audio tracks
-@bot.command()
+@bot.command(help = "Shows previously played audio tracks.")
 async def history(ctx):
     if playback_history:
         history_message = "**Playback History:**\n"
@@ -190,7 +190,7 @@ async def history(ctx):
         await ctx.send("No tracks have been played yet.")
 
 # Command to stop playback and disconnect PakoDJ
-@bot.command()
+@bot.command(help = "Stops playback and disconnects bot from voice channel.")
 async def stop(ctx):
     try:
         if ctx.voice_client is not None:
