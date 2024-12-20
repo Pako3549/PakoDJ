@@ -17,14 +17,18 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# current track
-current_track = None
+# Dizionari per memorizzare le informazioni di riproduzione per ogni server
+server_playback_info = {}
 
-# Audio queue
-audio_queue = []
-
-# Audio history
-playback_history = []
+# Funzione per ottenere le informazioni di riproduzione per un server
+def get_server_info(guild_id):
+    if guild_id not in server_playback_info:
+        server_playback_info[guild_id] = {
+            'current_track': None,
+            'audio_queue': [],
+            'playback_history': []
+        }
+    return server_playback_info[guild_id]
 
 # Get audio function
 def get_audio_stream_url(url):
@@ -62,13 +66,15 @@ def search_youtube(query):
         return None, None, None
 
 # Callback function to manage audio reproduction errors
-def after_playing(error):
+def after_playing(error, guild_id):
     if error:
         print(f"Error during playback: {error}")
-    if audio_queue:
-        next_track = audio_queue.pop(0)
+    server_info = get_server_info(guild_id)
+    if server_info['audio_queue']:
+        next_track = server_info['audio_queue'].pop(0)
         asyncio.run_coroutine_threadsafe(play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url']), bot.loop)
 
+# Function to play song track in voice channel
 async def play_audio(ctx, stream_url, title, video_url):
     vc = ctx.voice_client
     if vc is None:
@@ -77,21 +83,22 @@ async def play_audio(ctx, stream_url, title, video_url):
 
     # DO NOT CHANGE SOURCE, OTHERWISE IT'LL STOP WHILE PLAYING
     source = FFmpegPCMAudio(source=stream_url, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5", options="-vn")
-    vc.play(source, after=lambda e: after_playing(e))
+    vc.play(source, after=lambda e: after_playing(e, ctx.guild.id))
     await ctx.send(f"I'm playing: **{title}**\n{video_url}")
 
     # Add to history
-    playback_history.append({'title': title, 'video_url': video_url})
+    server_info = get_server_info(ctx.guild.id)
+    server_info['playback_history'].append({'title': title, 'video_url': video_url})
 
     # Set current track
-    global current_track
-    current_track = {'title': title, 'video_url': video_url}
+    server_info['current_track'] = {'title': title, 'video_url': video_url}
 
 # Command to display current audio track
 @bot.command(help = "Shows current audio track.")
 async def track(ctx):
-    if current_track:
-        await ctx.send(f"Current track: **{current_track['title']}**\n{current_track['video_url']}")
+    server_info = get_server_info(ctx.guild.id)
+    if server_info['current_track']:
+        await ctx.send(f"Current track: **{server_info['current_track']['title']}**\n{server_info['current_track']['video_url']}")
     else:
         await ctx.send("No track is currently playing.")
 
@@ -126,8 +133,9 @@ async def play(ctx, *, query: str):
                 await ctx.send("Unable to retrieve audio stream.")
                 return
 
+            server_info = get_server_info(ctx.guild.id)
             if ctx.voice_client and ctx.voice_client.is_playing():
-                audio_queue.append({'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url})
+                server_info['audio_queue'].append({'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url})
                 await ctx.send(f"Track added to queue: **{title}**\n{video_url}")
             else:
                 await play_audio(ctx, stream_url, title, video_url)
@@ -140,10 +148,11 @@ async def play(ctx, *, query: str):
 # Command to skip current track
 @bot.command(help = "Stops current audio track and plays the next one in the queue.")
 async def skip(ctx):
+    server_info = get_server_info(ctx.guild.id)
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.stop()
-        if audio_queue:
-            next_track = audio_queue.pop(0)
+        if server_info['audio_queue']:
+            next_track = server_info['audio_queue'].pop(0)
             await play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url'])
         else:
             await ctx.send("Queue's empty. No track to play.")
@@ -170,9 +179,10 @@ async def resume(ctx):
 
 @bot.command(help = "Shows queued audio tracks.")
 async def queue(ctx):
-    if audio_queue:
+    server_info = get_server_info(ctx.guild.id)
+    if server_info['audio_queue']:
         queue_message = "**Queue:**\n"
-        for i, track in enumerate(audio_queue, 1):
+        for i, track in enumerate(server_info['audio_queue'], 1):
             queue_message += f"{i}. {track['title']} ({track['video_url']})\n"
         await ctx.send(queue_message)
     else:
@@ -181,9 +191,10 @@ async def queue(ctx):
 # Command to show previosly played audio tracks
 @bot.command(help = "Shows previously played audio tracks.")
 async def history(ctx):
-    if playback_history:
+    server_info = get_server_info(ctx.guild.id)
+    if server_info['playback_history']:
         history_message = "**Playback History:**\n"
-        for i, track in enumerate(playback_history, 1):
+        for i, track in enumerate(server_info['playback_history'], 1):
             history_message += f"{i}. {track['title']} ({track['video_url']})\n"
         await ctx.send(history_message)
     else:
