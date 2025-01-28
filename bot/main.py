@@ -17,10 +17,10 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Dizionari per memorizzare le informazioni di riproduzione per ogni server
+# Dictionaries to store playback information for each server
 server_playback_info = {}
 
-# Funzione per ottenere le informazioni di riproduzione per un server
+# Function to get playback information for a server
 def get_server_info(guild_id):
     if guild_id not in server_playback_info:
         server_playback_info[guild_id] = {
