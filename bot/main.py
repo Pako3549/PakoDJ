@@ -107,6 +107,7 @@ async def track(ctx):
 async def custom_help(ctx):
     help_message = """
 **PakoDJ Bot Commands:**
+- `!join` - Joins user's voice channel
 - `!play` - Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).
 - `!skip` - Stops current audio track and plays the next one in the queue.
 - `!pause` - Pauses currently playing audio track.
@@ -117,6 +118,16 @@ async def custom_help(ctx):
 - `!stop` - Stops playback and disconnects bot from voice channel.
     """
     await ctx.send(help_message)
+
+# Command to join the user's voice channel
+@bot.command(help = "Joins user's voice channel.")
+async def join(ctx):
+    if ctx.author.voice:
+        channel = ctx.author.voice.channel
+        await channel.connect()
+        await ctx.send(f"Joined {channel}")
+    else:
+        await ctx.send("You need to be in a voice channel to use this command.")
 
 # Command to reproduce audio
 @bot.command(help = "Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).")
