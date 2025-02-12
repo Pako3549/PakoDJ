@@ -122,12 +122,22 @@ async def custom_help(ctx):
 # Command to join the user's voice channel
 @bot.command(help = "Joins user's voice channel.")
 async def join(ctx):
-    if ctx.author.voice:
-        channel = ctx.author.voice.channel
-        await channel.connect()
-        await ctx.send(f"Joined {channel}")
-    else:
-        await ctx.send("You need to be in a voice channel to use this command.")
+    try:
+        if ctx.author.voice:
+            channel = ctx.author.voice.channel
+            await channel.connect()
+            await ctx.send(f"Joined {channel}")
+        else:
+            await ctx.send("You need to be in a voice channel to use this command.")
+    except discord.ClientException as e:
+        await ctx.send(f"Error: {e}")
+        print(f"ClientException: {e}")
+    except discord.InvalidArgument as e:
+        await ctx.send(f"Error: {e}")
+        print(f"InvalidArgument: {e}")
+    except Exception as e:
+        await ctx.send(f"An unexpected error occurred: {e}")
+        print(f"Unexpected error: {e}")
 
 # Command to reproduce audio
 @bot.command(help = "Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).")
