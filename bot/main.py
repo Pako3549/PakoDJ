@@ -20,6 +20,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Dictionaries to store playback information for each server
 server_playback_info = {}
 
+# Global track counter
+track_counter = 0
+
 # Function to get playback information for a server
 def get_server_info(guild_id):
     if guild_id not in server_playback_info:
@@ -142,6 +145,7 @@ async def join(ctx):
 # Command to reproduce audio
 @bot.command(help = "Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).")
 async def play(ctx, *, query: str):
+    global track_counter
     try:
         if ctx.author.voice:
             # Get the audio stream link, title, and video link
@@ -155,8 +159,9 @@ async def play(ctx, *, query: str):
                 return
 
             server_info = get_server_info(ctx.guild.id)
+            track_counter += 1
             if ctx.voice_client and ctx.voice_client.is_playing():
-                server_info['audio_queue'].append({'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url})
+                server_info['audio_queue'].append({'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url, 'track_number': track_counter})
                 await ctx.send(f"Track added to queue: **{title}**\n{video_url}")
             else:
                 await play_audio(ctx, stream_url, title, video_url)
@@ -198,25 +203,34 @@ async def resume(ctx):
     else:
         await ctx.send("No paused track.")
 
+# Command to show queued audio tracks
 @bot.command(help = "Shows queued audio tracks.")
 async def queue(ctx):
     server_info = get_server_info(ctx.guild.id)
     if server_info['audio_queue']:
         queue_message = "**Queue:**\n"
-        for i, track in enumerate(server_info['audio_queue'], 1):
-            queue_message += f"{i}. {track['title']} ({track['video_url']})\n"
+        for track in server_info['audio_queue']:
+            track_info = f"{track['track_number']}. {track['title']} ({track['video_url']})\n"
+            if len(queue_message) + len(track_info) <= 2000:
+                queue_message += track_info
+            else:
+                break
         await ctx.send(queue_message)
     else:
         await ctx.send("Queue's empty.")
 
-# Command to show previosly played audio tracks
+# Command to show previously played audio tracks
 @bot.command(help = "Shows previously played audio tracks.")
 async def history(ctx):
     server_info = get_server_info(ctx.guild.id)
     if server_info['playback_history']:
         history_message = "**Playback History:**\n"
-        for i, track in enumerate(server_info['playback_history'], 1):
-            history_message += f"{i}. {track['title']} ({track['video_url']})\n"
+        for i, track in enumerate(reversed(server_info['playback_history']), 1):
+            track_info = f"{i}. {track['title']} ({track['video_url']})\n"
+            if len(history_message) + len(track_info) <= 2000:
+                history_message += track_info
+            else:
+                break
         await ctx.send(history_message)
     else:
         await ctx.send("No tracks have been played yet.")
