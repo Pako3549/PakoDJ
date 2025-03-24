@@ -24,6 +24,7 @@ Before starting, make sure you have:
     - `discord.py`
     - `yt-dlp`
     - `python-dotenv`
+    - `PyNaCl`
 ## ⚙️ Setup
 1. **Clone the repository**:
     ```bash
