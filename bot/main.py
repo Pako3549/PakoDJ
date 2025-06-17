@@ -41,7 +41,8 @@ def get_audio_stream_url(url):
         
         ydl_opts = {
             'format': 'bestaudio/best',
-            'quiet': True
+            'quiet': True,
+            'cookiefile': 'youtube_cookies.txt'
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -59,7 +60,8 @@ def search_youtube(query):
             'format': 'bestaudio/best',
             'quiet': True,
             'default_search': 'ytsearch',
-            'max_downloads': 1
+            'max_downloads': 1,
+            'cookiefile': 'youtube_cookies.txt'
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=False)

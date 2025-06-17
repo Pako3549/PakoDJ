@@ -42,6 +42,18 @@ Before starting, make sure you have:
     ```bash
     python main.py
     ```
+
+## ⚠️ Age-Restricted (+18) YouTube Videos
+
+If you want to play age-restricted (+18) YouTube videos, you must provide your YouTube cookies to yt-dlp.  
+Please follow the official yt-dlp guides:
+
+- [How do I pass cookies to yt-dlp?](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)
+- [Exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)
+
+After extracting your cookies, save them in a text file named `youtube_cookies.txt` in the same directory as the script that starts the bot (`main.py`).  
+This is required only for playing age-restricted content; for normal videos, no cookies are needed.
+
 ## 📖 Command
 
 | Command         | Description                                                                                         |
