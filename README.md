@@ -21,7 +21,7 @@
 Before starting, make sure you have:
 - **Python 3.8 or higher** installed.
 - **ffmpeg** installed.
-- A Discord bot token (you can obtain one from the Discord Developer Portal).
+- A Discord bot token (you can obtain one from the [Discord Developer Portal](https://discord.com/developers/applications)).
 - The following Python libraries installed:
     - `discord.py`
     - `yt-dlp`
