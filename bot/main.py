@@ -279,7 +279,8 @@ async def queue(ctx):
 async def history(ctx):
     server_info = get_server_info(ctx.guild.id)
     if server_info['playback_history']:
-        history_message = "**Playback History:**\n"
+        history_message = "**Playback History (latest first):**\n"
+        # Show latest track first
         for i, track in enumerate(reversed(server_info['playback_history']), 1):
             track_info = f"{i}. {track['title']} ({track['video_url']})\n"
             if len(history_message) + len(track_info) <= 2000:
