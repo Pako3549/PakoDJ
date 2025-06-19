@@ -29,7 +29,7 @@ def get_server_info(guild_id):
     if guild_id not in server_playback_info:
         server_playback_info[guild_id] = {
             'current_track': None,
-            'audio_queue': [],
+            'audio_queue': [], 
             'playback_history': []
         }
     return server_playback_info[guild_id]
@@ -85,9 +85,16 @@ def after_playing(error, guild_id):
     lock = get_server_lock(guild_id)
     async def next_track():
         async with lock:
-            if server_info['audio_queue']:
-                next_track = server_info['audio_queue'].pop(0)
-                await play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url'])
+            while server_info['audio_queue']:
+                group = server_info['audio_queue'][0]
+                if group:
+                    next_track = group.pop(0)
+                    if not group:
+                        server_info['audio_queue'].pop(0)
+                    await play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url'])
+                    break
+                else:
+                    server_info['audio_queue'].pop(0)
     asyncio.run_coroutine_threadsafe(next_track(), bot.loop)
 
 # Function to play song track in voice channel
@@ -162,7 +169,6 @@ async def play(ctx, *, query: str):
     global track_counter
     try:
         if ctx.author.voice:
-            # Get the audio stream link, title, and video link
             if query.startswith("http://") or query.startswith("https://"):
                 stream_url, title, video_url = get_audio_stream_url(query)
             else:
@@ -176,8 +182,9 @@ async def play(ctx, *, query: str):
             lock = get_server_lock(ctx.guild.id)
             async with lock:
                 track_counter += 1
+                track = {'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url, 'track_number': track_counter}
                 if ctx.voice_client and ctx.voice_client.is_playing():
-                    server_info['audio_queue'].append({'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url, 'track_number': track_counter})
+                    server_info['audio_queue'].append([track]) 
                     await ctx.send(f"Track added to queue: **{title}**\n{video_url}")
                 else:
                     await play_audio(ctx, stream_url, title, video_url)
@@ -197,7 +204,6 @@ async def repeat(ctx, n: int, *, query: str):
                 await ctx.send("Please choose a number greater than 0.")
                 return
 
-            # Get track info
             if query.startswith("http://") or query.startswith("https://"):
                 stream_url, title, video_url = get_audio_stream_url(query)
             else:
@@ -210,34 +216,25 @@ async def repeat(ctx, n: int, *, query: str):
             server_info = get_server_info(ctx.guild.id)
             lock = get_server_lock(ctx.guild.id)
             async with lock:
+                repeat_group = []
+                for i in range(n):
+                    track_counter += 1
+                    repeat_group.append({
+                        'ctx': ctx,
+                        'url': stream_url,
+                        'title': f"{title} (loop {i+1}/{n})",
+                        'video_url': video_url,
+                        'track_number': track_counter
+                    })
                 if ctx.voice_client and ctx.voice_client.is_playing():
-                    # Bot is playing: add all looped tracks to queue and send queue message
-                    for i in range(n):
-                        track_counter += 1
-                        track = {
-                            'ctx': ctx,
-                            'url': stream_url,
-                            'title': f"{title} (loop {i+1}/{n})",
-                            'video_url': video_url,
-                            'track_number': track_counter
-                        }
-                        server_info['audio_queue'].append(track)
+                    server_info['audio_queue'].append(repeat_group)  # Add as a group
                     await ctx.send(f"Track added to queue: **{title}** (loop x{n})\n{video_url}")
                 else:
-                    # Bot is not playing: play first track, queue the rest, only 'playing' message will be sent
-                    for i in range(n):
-                        track_counter += 1
-                        track = {
-                            'ctx': ctx,
-                            'url': stream_url,
-                            'title': f"{title} (loop {i+1}/{n})",
-                            'video_url': video_url,
-                            'track_number': track_counter
-                        }
-                        if i == 0:
-                            await play_audio(ctx, stream_url, f"{title} (loop 1/{n})", video_url)
-                        else:
-                            server_info['audio_queue'].append(track)
+                    # Play the first in the group, queue the rest as a group
+                    first, rest = repeat_group[0], repeat_group[1:]
+                    await play_audio(first['ctx'], first['url'], first['title'], first['video_url'])
+                    if rest:
+                        server_info['audio_queue'].insert(0, rest)  # Play the rest as a group next
         else:
             await ctx.send("You have to be in a voice channel to use this command!")
     except Exception as e:
@@ -248,22 +245,15 @@ async def repeat(ctx, n: int, *, query: str):
 @bot.command(help = "Stops current audio track and plays the next one in the queue.")
 async def skip(ctx):
     server_info = get_server_info(ctx.guild.id)
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        # Remove all iterations from the track in queue
-        current = server_info['current_track']
-        if current:
-            server_info['audio_queue'] = [
-                track for track in server_info['audio_queue']
-                if track['title'].split(' (loop')[0] != current['title'].split(' (loop')[0]
-            ]
-        ctx.voice_client.stop()
+    lock = get_server_lock(ctx.guild.id)
+    async with lock:
         if server_info['audio_queue']:
-            next_track = server_info['audio_queue'].pop(0)
-            await play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url'])
-        else:
+            server_info['audio_queue'].pop(0)
+        if ctx.voice_client and ctx.voice_client.is_playing():
+            ctx.voice_client.stop()
             await ctx.send("Queue's empty. No track to play.")
-    else:
-        await ctx.send("No track playing.")
+        else:
+            await ctx.send("No track to play.")
 
 # Command to pause current track
 @bot.command(help = "Pauses currently playing audio track.")
@@ -289,12 +279,13 @@ async def queue(ctx):
     server_info = get_server_info(ctx.guild.id)
     if server_info['audio_queue']:
         queue_message = "**Queue:**\n"
-        for track in server_info['audio_queue']:
-            track_info = f"{track['track_number']}. {track['title']} ({track['video_url']})\n"
-            if len(queue_message) + len(track_info) <= 2000:
-                queue_message += track_info
-            else:
-                break
+        for group in server_info['audio_queue']:
+            for track in group:
+                track_info = f"{track['track_number']}. {track['title']} ({track['video_url']})\n"
+                if len(queue_message) + len(track_info) <= 2000:
+                    queue_message += track_info
+                else:
+                    break
         await ctx.send(queue_message)
     else:
         await ctx.send("Queue's empty.")
