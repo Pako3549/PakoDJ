@@ -210,19 +210,36 @@ async def repeat(ctx, n: int, *, query: str):
             server_info = get_server_info(ctx.guild.id)
             lock = get_server_lock(ctx.guild.id)
             async with lock:
-                for i in range(n):
-                    track_counter += 1
-                    track = {
-                        'ctx': ctx,
-                        'url': stream_url,
-                        'title': f"{title} (loop {i+1}/{n})",
-                        'video_url': video_url,
-                        'track_number': track_counter
-                    }
-                    if ctx.voice_client and ctx.voice_client.is_playing() or i > 0:
+                # If bot is playing a track, the loop is queued
+                if ctx.voice_client and ctx.voice_client.is_playing():
+                    for i in range(n):
+                        track_counter += 1
+                        track = {
+                            'ctx': ctx,
+                            'url': stream_url,
+                            'title': f"{title} (loop {i+1}/{n})",
+                            'video_url': video_url,
+                            'track_number': track_counter
+                        }
                         server_info['audio_queue'].append(track)
-                    else:
-                        await play_audio(ctx, stream_url, f"{title} (loop 1/{n})", video_url)
+                    await ctx.send(f"Track added to queue: **{title}** (loop x{n})\n{video_url}")
+                else:
+                    # If bot is not playing a track, the loop starts immediately
+                    for i in range(n):
+                        track_counter += 1
+                        track = {
+                            'ctx': ctx,
+                            'url': stream_url,
+                            'title': f"{title} (loop {i+1}/{n})",
+                            'video_url': video_url,
+                            'track_number': track_counter
+                        }
+                        if i == 0:
+                            await play_audio(ctx, stream_url, f"{title} (loop 1/{n})", video_url)
+                        else:
+                            server_info['audio_queue'].append(track)
+                    if n > 1:
+                        await ctx.send(f"Track **{title}** is playing now and will repeat {n-1} more times (added to queue).\n{video_url}")
         else:
             await ctx.send("You have to be in a voice channel to use this command!")
     except Exception as e:
