@@ -125,6 +125,7 @@ async def custom_help(ctx):
 **PakoDJ Bot Commands:**
 - `!join` - Joins user's voice channel
 - `!play` - Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).
+- `!repeat` - Plays a song in loop for n times (use `!skip` to stop the loop).
 - `!skip` - Stops current audio track and plays the next one in the queue.
 - `!pause` - Pauses currently playing audio track.
 - `!resume` - Resumes paused audio track.
