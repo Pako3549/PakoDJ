@@ -19,6 +19,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Dictionaries to store playback information for each server
 server_playback_info = {}
+server_locks = {}
 
 # Global track counter
 track_counter = 0
@@ -32,6 +33,12 @@ def get_server_info(guild_id):
             'playback_history': []
         }
     return server_playback_info[guild_id]
+
+# Function to lock queue while stopping track
+def get_server_lock(guild_id):
+    if guild_id not in server_locks:
+        server_locks[guild_id] = asyncio.Lock()
+    return server_locks[guild_id]
 
 # Get audio function
 def get_audio_stream_url(url):
@@ -75,9 +82,13 @@ def after_playing(error, guild_id):
     if error:
         print(f"Error during playback: {error}")
     server_info = get_server_info(guild_id)
-    if server_info['audio_queue']:
-        next_track = server_info['audio_queue'].pop(0)
-        asyncio.run_coroutine_threadsafe(play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url']), bot.loop)
+    lock = get_server_lock(guild_id)
+    async def next_track():
+        async with lock:
+            if server_info['audio_queue']:
+                next_track = server_info['audio_queue'].pop(0)
+                await play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url'])
+    asyncio.run_coroutine_threadsafe(next_track(), bot.loop)
 
 # Function to play song track in voice channel
 async def play_audio(ctx, stream_url, title, video_url):
@@ -161,12 +172,14 @@ async def play(ctx, *, query: str):
                 return
 
             server_info = get_server_info(ctx.guild.id)
-            track_counter += 1
-            if ctx.voice_client and ctx.voice_client.is_playing():
-                server_info['audio_queue'].append({'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url, 'track_number': track_counter})
-                await ctx.send(f"Track added to queue: **{title}**\n{video_url}")
-            else:
-                await play_audio(ctx, stream_url, title, video_url)
+            lock = get_server_lock(ctx.guild.id)
+            async with lock:
+                track_counter += 1
+                if ctx.voice_client and ctx.voice_client.is_playing():
+                    server_info['audio_queue'].append({'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url, 'track_number': track_counter})
+                    await ctx.send(f"Track added to queue: **{title}**\n{video_url}")
+                else:
+                    await play_audio(ctx, stream_url, title, video_url)
         else:
             await ctx.send("You have to be in a voice channel to use this command!")
     except Exception as e:
@@ -194,19 +207,21 @@ async def repeat(ctx, n: int, *, query: str):
                 return
 
             server_info = get_server_info(ctx.guild.id)
-            for i in range(n):
-                track_counter += 1
-                track = {
-                    'ctx': ctx,
-                    'url': stream_url,
-                    'title': f"{title} (loop {i+1}/{n})",
-                    'video_url': video_url,
-                    'track_number': track_counter
-                }
-                if ctx.voice_client and ctx.voice_client.is_playing() or i > 0:
-                    server_info['audio_queue'].append(track)
-                else:
-                    await play_audio(ctx, stream_url, f"{title} (loop 1/{n})", video_url)
+            lock = get_server_lock(ctx.guild.id)
+            async with lock:
+                for i in range(n):
+                    track_counter += 1
+                    track = {
+                        'ctx': ctx,
+                        'url': stream_url,
+                        'title': f"{title} (loop {i+1}/{n})",
+                        'video_url': video_url,
+                        'track_number': track_counter
+                    }
+                    if ctx.voice_client and ctx.voice_client.is_playing() or i > 0:
+                        server_info['audio_queue'].append(track)
+                    else:
+                        await play_audio(ctx, stream_url, f"{title} (loop 1/{n})", video_url)
         else:
             await ctx.send("You have to be in a voice channel to use this command!")
     except Exception as e:
@@ -218,7 +233,7 @@ async def repeat(ctx, n: int, *, query: str):
 async def skip(ctx):
     server_info = get_server_info(ctx.guild.id)
     if ctx.voice_client and ctx.voice_client.is_playing():
-        # Rimuovi tutte le ripetizioni della traccia corrente dalla coda
+        # Remove all iterations from the track in queue
         current = server_info['current_track']
         if current:
             server_info['audio_queue'] = [
