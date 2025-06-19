@@ -173,26 +173,64 @@ async def play(ctx, *, query: str):
         await ctx.send(f"Error: {e}")
         print(f"Error: {e}")
 
+# Command to play a track in loop
+@bot.command(help="Plays an audio track in loop for n times (use !skip to stop).")
+async def repeat(ctx, n: int, *, query: str):
+    global track_counter
+    try:
+        if ctx.author.voice:
+            if n < 1:
+                await ctx.send("Please choose a number greater than 0.")
+                return
+
+            # Get track info
+            if query.startswith("http://") or query.startswith("https://"):
+                stream_url, title, video_url = get_audio_stream_url(query)
+            else:
+                stream_url, title, video_url = search_youtube(query)
+
+            if stream_url is None:
+                await ctx.send("Unable to retrieve audio stream.")
+                return
+
+            server_info = get_server_info(ctx.guild.id)
+            for i in range(n):
+                track_counter += 1
+                track = {
+                    'ctx': ctx,
+                    'url': stream_url,
+                    'title': f"{title} (loop {i+1}/{n})",
+                    'video_url': video_url,
+                    'track_number': track_counter
+                }
+                if ctx.voice_client and ctx.voice_client.is_playing() or i > 0:
+                    server_info['audio_queue'].append(track)
+                else:
+                    await play_audio(ctx, stream_url, f"{title} (loop 1/{n})", video_url)
+        else:
+            await ctx.send("You have to be in a voice channel to use this command!")
+    except Exception as e:
+        await ctx.send(f"Error: {e}")
+        print(f"Error: {e}")
+
 # Command to skip current track
 @bot.command(help = "Stops current audio track and plays the next one in the queue.")
 async def skip(ctx):
     server_info = get_server_info(ctx.guild.id)
     if ctx.voice_client and ctx.voice_client.is_playing():
+        # Rimuovi tutte le ripetizioni della traccia corrente dalla coda
+        current = server_info['current_track']
+        if current:
+            server_info['audio_queue'] = [
+                track for track in server_info['audio_queue']
+                if track['title'].split(' (loop')[0] != current['title'].split(' (loop')[0]
+            ]
         ctx.voice_client.stop()
         if server_info['audio_queue']:
             next_track = server_info['audio_queue'].pop(0)
             await play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url'])
         else:
             await ctx.send("Queue's empty. No track to play.")
-    else:
-        await ctx.send("No track playing.")
-
-# Command to pause current track
-@bot.command(help = "Pauses currently playing audio track.")
-async def pause(ctx):
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        ctx.voice_client.pause()
-        await ctx.send("Track paused.")
     else:
         await ctx.send("No track playing.")
 
