@@ -250,6 +250,15 @@ async def skip(ctx):
     else:
         await ctx.send("No track playing.")
 
+# Command to pause current track
+@bot.command(help = "Pauses currently playing audio track.")
+async def pause(ctx):
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        ctx.voice_client.pause()
+        await ctx.send("Track paused.")
+    else:
+        await ctx.send("No track playing.")
+
 # Command to resume current track
 @bot.command(help = "Resumes paused audio track.")
 async def resume(ctx):
