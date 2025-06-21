@@ -247,11 +247,15 @@ async def skip(ctx):
     server_info = get_server_info(ctx.guild.id)
     lock = get_server_lock(ctx.guild.id)
     async with lock:
+        queue_was_empty = not server_info['audio_queue']
         if server_info['audio_queue']:
             server_info['audio_queue'].pop(0)
         if ctx.voice_client and ctx.voice_client.is_playing():
             ctx.voice_client.stop()
-            await ctx.send("Queue's empty. No track to play.")
+            await asyncio.sleep(1)
+            updated_info = get_server_info(ctx.guild.id)
+            if not updated_info['audio_queue'] and not ctx.voice_client.is_playing():
+                await ctx.send("Queue's empty. No track to play.")
         else:
             await ctx.send("No track to play.")
 
