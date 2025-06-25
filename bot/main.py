@@ -43,14 +43,13 @@ def get_server_lock(guild_id):
 # Get audio function
 def get_audio_stream_url(url):
     try:
-        # Remove additional parameters from the URL
         url = re.sub(r'&.*', '', url)
-        
         ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True,
-            'cookiefile': 'youtube_cookies.txt'
         }
+        if os.path.isfile('youtube_cookies.txt'):
+            ydl_opts['cookiefile'] = 'youtube_cookies.txt'
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if info is None:
@@ -68,8 +67,9 @@ def search_youtube(query):
             'quiet': True,
             'default_search': 'ytsearch',
             'max_downloads': 1,
-            'cookiefile': 'youtube_cookies.txt'
         }
+        if os.path.isfile('youtube_cookies.txt'):
+            ydl_opts['cookiefile'] = 'youtube_cookies.txt'
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=False)
             return info['entries'][0]['url'], info['entries'][0]['title'], info['entries'][0]['webpage_url']
