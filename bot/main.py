@@ -95,6 +95,8 @@ def after_playing(error, guild_id):
                     break
                 else:
                     server_info['audio_queue'].pop(0)
+            if not server_info['audio_queue']:
+                server_info['current_track'] = None
     asyncio.run_coroutine_threadsafe(next_track(), bot.loop)
 
 # Function to play song track in voice channel
@@ -134,6 +136,7 @@ async def custom_help(ctx):
 - `!play` - Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).
 - `!repeat` - Plays a song in loop for n times (use `!skip` to stop the loop).
 - `!skip` - Stops current audio track and plays the next one in the queue.
+- `!skip all` - Skips the current track and the loop; then it plays the next track in queue.
 - `!pause` - Pauses currently playing audio track.
 - `!resume` - Resumes paused audio track.
 - `!track` - Shows current audio track.
@@ -242,21 +245,30 @@ async def repeat(ctx, n: int, *, query: str):
         print(f"Error: {e}")
 
 # Command to skip current track
-@bot.command(help = "Stops current audio track and plays the next one in the queue.")
-async def skip(ctx):
+@bot.command(help = "Stops current audio track and plays the next one in the queue. Use '!skip all' to skip the current repeat group.")
+async def skip(ctx, arg: str = None):
     server_info = get_server_info(ctx.guild.id)
     lock = get_server_lock(ctx.guild.id)
     async with lock:
-        queue_was_empty = not server_info['audio_queue']
-        if server_info['audio_queue']:
-            server_info['audio_queue'].pop(0)
         if ctx.voice_client and ctx.voice_client.is_playing():
-            ctx.voice_client.stop()
-            await asyncio.sleep(1)
-            updated_info = get_server_info(ctx.guild.id)
-            if not updated_info['audio_queue'] and not ctx.voice_client.is_playing():
-                await ctx.send("Queue's empty. No track to play.")
+            if arg == "all":
+                current_title = server_info['current_track']['title'] if server_info['current_track'] else None
+                found = False
+                for i, group in enumerate(server_info['audio_queue']):
+                    if any(current_title and current_title.split(" (loop")[0] in t['title'] for t in group):
+                        server_info['audio_queue'].pop(i)
+                        found = True
+                        break
+                ctx.voice_client.stop()
+                if found:
+                    await ctx.send("Skipped current track and the rest of the loop.")
+                else:
+                    await ctx.send("Skipped current track (no loop found).")
+            else:
+                ctx.voice_client.stop()
+                await ctx.send("Skipped current track.")
         else:
+            server_info['current_track'] = None
             await ctx.send("No track to play.")
 
 # Command to pause current track

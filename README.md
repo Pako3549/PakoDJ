@@ -58,18 +58,19 @@ This is required only for playing age-restricted content; for normal videos, no 
 
 ## 📖 Command
 
-| Command                | Description                                                                                         |
-| ---------------------- | --------------------------------------------------------------------------------------------------- |
-| `!play <query>`        | Plays a song searched using keywords or a link. If a song is already playing, adds it to the queue. |
-| `!repeat <n> <query>`  | Plays a song in loop for n times (use `!skip` to stop the loop).                                    |
-| `!skip`                | Skips the current track and plays the next one in the queue.                                        |
-| `!pause`               | Pauses the currently playing track.                                                                 |
-| `!resume`              | Resumes the paused track.                                                                           |
-| `!track`               | Shows the currently playing track.                                                                  |
-| `!queue`               | Displays the queue of tracks.                                                                       |
-| `!history`             | Shows the history of previously played tracks.                                                      |
-| `!stop`                | Stops playback and disconnects the bot from the voice channel.                                      |
-| `!djhelp`              | Displays the list of available commands.                                                            |
+| Command                | Description                                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `!play <query>`        | Plays a song searched using keywords or a link. If a song is already playing, adds it to the queue.                 |
+| `!repeat <n> <query>`  | Plays a song in loop for n times (use `!skip` to stop the loop).                                                    |
+| `!skip`                | Skips the current track and plays the next one in the queue.                                                        |
+| `!skip all`            | Skips the current track and the loop; then it plays the next track in queue.     |
+| `!pause`               | Pauses the currently playing track.                                                                                  |
+| `!resume`              | Resumes the paused track.                                                                                           |
+| `!track`               | Shows the currently playing track.                                                                                   |
+| `!queue`               | Displays the queue of tracks.                                                                                       |
+| `!history`             | Shows the history of previously played tracks.                                                                      |
+| `!stop`                | Stops playback and disconnects the bot from the voice channel.                                                      |
+| `!djhelp`              | Displays the list of available commands.                                                                            |                                                      |
 
 ## 🛠️ How It Works
 - **Search and Playback**: The bot uses `yt-dlp` to fetch the best available audio from YouTube.
