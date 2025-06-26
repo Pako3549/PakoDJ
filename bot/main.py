@@ -134,7 +134,7 @@ async def custom_help(ctx):
 **PakoDJ Bot Commands:**
 - `!join` - Joins user's voice channel
 - `!play` - Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).
-- `!repeat` - Plays a song in loop for n times (use `!skip` to stop the loop).
+- `!repeat` - Plays a song in loop for n times (use `!skip all` to stop the loop).
 - `!skip` - Stops current audio track and plays the next one in the queue.
 - `!skip all` - Skips the current track and the loop; then it plays the next track in queue.
 - `!pause` - Pauses currently playing audio track.
@@ -198,7 +198,7 @@ async def play(ctx, *, query: str):
         print(f"Error: {e}")
 
 # Command to play a track in loop
-@bot.command(help="Plays an audio track in loop for n times (use !skip to stop).")
+@bot.command(help="Plays an audio track in loop for n times (use `!skip all` to stop).")
 async def repeat(ctx, n: int, *, query: str):
     global track_counter
     try:

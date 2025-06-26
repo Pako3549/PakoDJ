@@ -61,7 +61,7 @@ This is required only for playing age-restricted content; for normal videos, no 
 | Command                | Description                                                                                                         |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `!play <query>`        | Plays a song searched using keywords or a link. If a song is already playing, adds it to the queue.                 |
-| `!repeat <n> <query>`  | Plays a song in loop for n times (use `!skip` to stop the loop).                                                    |
+| `!repeat <n> <query>`  | Plays a song in loop for n times (use `!skip all` to stop the loop).                                                    |
 | `!skip`                | Skips the current track and plays the next one in the queue.                                                        |
 | `!skip all`            | Skips the current track and the loop; then it plays the next track in queue.     |
 | `!pause`               | Pauses the currently playing track.                                                                                  |
