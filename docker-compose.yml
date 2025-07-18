@@ -1,0 +1,17 @@
+services:
+  pakodj:
+    build: .
+    container_name: pakodj
+    restart: unless-stopped
+    env_file:
+      - bot/.env
+    volumes:
+      # Optional: Mount logs directory if you want to persist logs
+      - ./logs:/app/logs
+      # Mount YouTube cookies file for age-restricted content
+      - ./bot/youtube_cookies.txt:/app/youtube_cookies.txt
+
+networks:
+  default:
+    name: pakodj-network
+    driver: bridge

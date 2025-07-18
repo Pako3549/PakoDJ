@@ -18,32 +18,60 @@
 - **Voice Integration**: Automatically connects to the voice channel you're in.
 - **Multi-Server Support**: Each server has its own queue and playback history.
 ## 📋 Prerequisites
-Before starting, make sure you have:
-- **Python 3.8 or higher** installed.
-- **ffmpeg** installed.
-- A Discord bot token (you can obtain one from the [Discord Developer Portal](https://discord.com/developers/applications)).
+### For Docker Setup:
+- **Docker** and **Docker Compose** installed
+- A Discord bot token (you can obtain one from the [Discord Developer Portal](https://discord.com/developers/applications))
+
+### For Manual Setup:
+- **Python 3.8 or higher** installed
+- **ffmpeg** installed
+- A Discord bot token (you can obtain one from the [Discord Developer Portal](https://discord.com/developers/applications))
 - The following Python libraries installed:
     - `discord.py`
     - `yt-dlp`
     - `python-dotenv`
     - `PyNaCl`
 ## ⚙️ Setup
+
+### 🐳 Docker Setup (Recommended)
 1. **Clone the repository**:
     ```bash
     git clone https://github.com/Pako3549/PakoDJ.git
+    cd PakoDJ
     ```
-2. **Install the dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
-3. **Configure the `.env` file**: Create a `.env` file in the main directory and add your bot token:
+2. **Configure the `.env` file**: Create a `.env` file in the `bot/` directory:
     ```env
     token=YOUR_BOT_TOKEN
     ```
-1. **Run the bot**:
+3. **Run with Docker Compose**:
     ```bash
-    python main.py
+    docker-compose up -d
     ```
+
+### 🐍 Manual Python Setup
+1. **Clone the repository**:
+    ```bash
+    git clone https://github.com/Pako3549/PakoDJ.git
+    cd PakoDJ
+    ```
+2. **Install the dependencies**:
+    ```bash
+    pip install -r bot/requirements.txt
+    ```
+3. **Configure the `.env` file**: Create a `.env` file in the `bot/` directory and add your bot token:
+    ```env
+    token=YOUR_BOT_TOKEN
+    ```
+4. **Run the bot**:
+    ```bash
+    python bot/main.py
+    ```
+
+### 🐳 Docker Management Commands
+- **View logs**: `docker-compose logs -f pakodj`
+- **Stop the bot**: `docker-compose down`
+- **Restart the bot**: `docker-compose restart pakodj`
+- **Update and rebuild**: `docker-compose up -d --build`
 
 ## ⚠️ Age-Restricted (+18) YouTube Videos
 
@@ -53,7 +81,13 @@ Please follow the official yt-dlp guides:
 - [How do I pass cookies to yt-dlp?](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)
 - [Exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)
 
-After extracting your cookies, save them in a text file named `youtube_cookies.txt` in the same directory as the script that starts the bot (`main.py`).  
+### For Docker Setup:
+After extracting your cookies, save them in a text file named `youtube_cookies.txt` in the `bot/` directory.  
+The Docker container will automatically mount this file and make it available to the bot.
+
+### For Manual Python Setup:
+After extracting your cookies, save them in a text file named `youtube_cookies.txt` in the same directory as the script that starts the bot (`bot/main.py`).
+
 This is required only for playing age-restricted content; for normal videos, no cookies are needed.
 
 ## 📖 Command
