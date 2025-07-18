@@ -8,6 +8,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     git \
+    build-essential \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file first to leverage Docker layer caching
