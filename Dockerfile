@@ -16,8 +16,8 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements file first to leverage Docker layer caching
 COPY bot/requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies (prefer binary wheels, compile if needed)
+RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
 
 # Copy bot source code
 COPY bot/ .
