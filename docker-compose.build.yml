@@ -1,6 +1,6 @@
 services:
   pakodj:
-    image: ghcr.io/pako3549/pakodj:latest
+    build: .
     container_name: pakodj
     restart: unless-stopped
     env_file:

@@ -43,10 +43,16 @@
     ```env
     token=YOUR_BOT_TOKEN
     ```
-3. **Run with Docker Compose**:
+3. **Run the bot**:
     ```bash
     docker-compose up -d
     ```
+
+#### Alternative: Build Locally (Slower)
+If you prefer to build the image yourself:
+```bash
+docker-compose -f docker-compose.build.yml up -d
+```
 
 ### 🐍 Manual Python Setup
 1. **Clone the repository**:
@@ -71,7 +77,12 @@
 - **View logs**: `docker-compose logs -f pakodj`
 - **Stop the bot**: `docker-compose down`
 - **Restart the bot**: `docker-compose restart pakodj`
-- **Update and rebuild**: `docker-compose up -d --build`
+- **Update image**: `docker-compose pull && docker-compose up -d`
+
+#### For Local Build (Alternative):
+- **View logs**: `docker-compose -f docker-compose.build.yml logs -f pakodj`
+- **Stop the bot**: `docker-compose -f docker-compose.build.yml down`
+- **Restart and rebuild**: `docker-compose -f docker-compose.build.yml up -d --build`
 
 ## ⚠️ Age-Restricted (+18) YouTube Videos
 
