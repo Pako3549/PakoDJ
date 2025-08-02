@@ -1,4 +1,4 @@
-﻿discord.py
+﻿discord.py[voice] @ git+https://github.com/Rapptz/discord.py@4496df79d047b7c26f0413c8a34086d309b96904
 PyNaCl
 yt-dlp
 python-dotenv
