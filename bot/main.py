@@ -327,6 +327,9 @@ async def history(ctx):
 @bot.command(help = "Stops playback and disconnects bot from voice channel.")
 async def stop(ctx):
     try:
+        server_info = get_server_info(ctx.guild.id)
+        server_info['audio_queue'].clear()
+        server_info['current_track'] = None
         if ctx.voice_client is not None:
             await ctx.voice_client.disconnect()
             await ctx.send("Track stopped and bot disconnected.")
