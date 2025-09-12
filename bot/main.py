@@ -65,13 +65,45 @@ def get_audio_stream_url(url):
             'format': 'bestaudio/best',
             'quiet': True,
         }
-        if os.path.isfile('youtube_cookies.txt'):
-            ydl_opts['cookiefile'] = 'youtube_cookies.txt'
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if info is None:
-                raise ValueError("No information retrieved from URL")
-            return info['url'], info['title'], info['webpage_url']
+        
+        # Special handling for SoundCloud - use RAM disk to avoid SD card wear
+        if is_soundcloud_url(url):
+            # Use /dev/shm (RAM disk) instead of /tmp to avoid SD card writes
+            import tempfile
+            import os
+            
+            # Try to use RAM disk first, fallback to /tmp if not available
+            ram_dir = '/dev/shm' if os.path.exists('/dev/shm') and os.access('/dev/shm', os.W_OK) else '/tmp'
+            
+            ydl_opts.update({
+                'format': 'bestaudio',
+                'outtmpl': f'{ram_dir}/%(title)s.%(ext)s',
+                'extractaudio': True,
+                'audioformat': 'mp3',
+                'audioquality': '128K'  # Reduced quality to save RAM/storage
+            })
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info is None:
+                    raise ValueError("No information retrieved from URL")
+                # Return the downloaded file path instead of stream URL
+                import glob
+                downloaded_file = glob.glob(f"{ram_dir}/{info['title']}.*")
+                if downloaded_file:
+                    return downloaded_file[0], info['title'], info['webpage_url']
+                else:
+                    raise ValueError("Downloaded file not found")
+        else:
+            # Normal streaming for non-SoundCloud URLs
+            if os.path.isfile('youtube_cookies.txt'):
+                ydl_opts['cookiefile'] = 'youtube_cookies.txt'
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info is None:
+                    raise ValueError("No information retrieved from URL")
+                return info['url'], info['title'], info['webpage_url']
+                
     except Exception as e:
         print(f"Error retrieving audio stream: {e}")
         return None, None, None
@@ -149,7 +181,16 @@ def get_spotify_track_info(url):
         print(f"Error processing Spotify URL: {e}")
         return None, None, None
 
-# Enhanced function to get audio stream URL (supports Spotify)
+# Function to check if URL is a SoundCloud URL
+def is_soundcloud_url(url):
+    soundcloud_patterns = [
+        r'soundcloud\.com/',
+        r'snd\.sc/',
+        r'm\.soundcloud\.com/'
+    ]
+    return any(re.search(pattern, url) for pattern in soundcloud_patterns)
+
+# Enhanced function to get audio stream URL (supports Spotify and SoundCloud)
 def get_enhanced_audio_info(query):
     if query.startswith("http://") or query.startswith("https://"):
         if is_spotify_url(query):
@@ -165,6 +206,18 @@ def after_playing(error, guild_id):
         print(f"Error during playback: {error}")
     server_info = get_server_info(guild_id)
     lock = get_server_lock(guild_id)
+    
+    # Clean up SoundCloud temporary files
+    current_track = server_info.get('current_track')
+    if current_track and 'temp_file' in current_track:
+        try:
+            import os
+            if os.path.exists(current_track['temp_file']):
+                os.remove(current_track['temp_file'])
+                print(f"Cleaned up temporary file: {current_track['temp_file']}")
+        except Exception as e:
+            print(f"Error cleaning up temporary file: {e}")
+    
     async def next_track():
         async with lock:
             while server_info['audio_queue']:
@@ -188,8 +241,18 @@ async def play_audio(ctx, stream_url, title, video_url):
         channel = ctx.author.voice.channel
         vc = await channel.connect()
 
-    # DO NOT CHANGE SOURCE, OTHERWISE IT'LL STOP WHILE PLAYING
-    source = FFmpegPCMAudio(source=stream_url, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5", options="-vn")
+    # Enhanced options for SoundCloud HLS support
+    before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+    ffmpeg_options = "-vn"
+    
+    # For SoundCloud files (now local files), use simple options
+    is_temp_file = stream_url.startswith('/dev/shm/') or stream_url.startswith('/tmp/')
+    if 'sndcdn.com' in video_url or is_temp_file:
+        # Simple options for local files
+        before_options = ""
+        ffmpeg_options = "-vn"
+    
+    source = FFmpegPCMAudio(source=stream_url, before_options=before_options, options=ffmpeg_options)
     vc.play(source, after=lambda e: after_playing(e, ctx.guild.id))
     await ctx.send(f"I'm playing: **{title}**\n{video_url}")
 
@@ -197,8 +260,11 @@ async def play_audio(ctx, stream_url, title, video_url):
     server_info = get_server_info(ctx.guild.id)
     server_info['playback_history'].append({'title': title, 'video_url': video_url})
 
-    # Set current track
-    server_info['current_track'] = {'title': title, 'video_url': video_url}
+    # Set current track with temp file info for cleanup
+    track_info = {'title': title, 'video_url': video_url}
+    if is_temp_file:
+        track_info['temp_file'] = stream_url
+    server_info['current_track'] = track_info
 
 # Command to display current audio track
 @bot.command(help = "Shows current audio track.")
@@ -215,8 +281,8 @@ async def custom_help(ctx):
     help_message = """
 **PakoDJ Bot Commands:**
 - `!join` - Joins user's voice channel
-- `!play` - Plays an audio track searched by keywords, YouTube link, or Spotify URL (if a song is currently playing, adds the searched song in a queue).
-- `!repeat` - Plays a song in loop for n times. Supports YouTube and Spotify URLs (use `!skip all` to stop the loop).
+- `!play` - Plays an audio track searched by keywords, YouTube link, Spotify URL, or SoundCloud URL (if a song is currently playing, adds the searched song in a queue).
+- `!repeat` - Plays a song in loop for n times. Supports YouTube, Spotify, and SoundCloud URLs (use `!skip all` to stop the loop).
 - `!skip` - Stops current audio track and plays the next one in the queue.
 - `!skip all` - Skips the current track and the loop; then it plays the next track in queue.
 - `!pause` - Pauses currently playing audio track.
@@ -249,7 +315,7 @@ async def join(ctx):
         print(f"Unexpected error: {e}")
 
 # Command to reproduce audio
-@bot.command(help = "Plays an audio track searched by keywords, YouTube link, or Spotify URL (if a song is currently playing, adds the searched song in a queue).")
+@bot.command(help = "Plays an audio track searched by keywords, YouTube link, Spotify URL, or SoundCloud URL (if a song is currently playing, adds the searched song in a queue).")
 async def play(ctx, *, query: str):
     global track_counter
     try:
@@ -277,7 +343,7 @@ async def play(ctx, *, query: str):
         print(f"Error: {e}")
 
 # Command to play a track in loop
-@bot.command(help="Plays an audio track in loop for n times. Supports YouTube and Spotify URLs (use `!skip all` to stop).")
+@bot.command(help="Plays an audio track in loop for n times. Supports YouTube, Spotify, and SoundCloud URLs (use `!skip all` to stop).")
 async def repeat(ctx, n: int, *, query: str):
     global track_counter
     try:

@@ -13,6 +13,7 @@
 ## 🛠️ Main Features
 - **Music Playback**: Search and play songs from YouTube via links or keywords.
 - **Spotify Integration**: Play music from Spotify URLs (tracks, albums, playlists) by searching on YouTube.
+- **SoundCloud Support**: Play music directly from SoundCloud URLs with enhanced HLS streaming support.
 - **Queue Management**: Add songs to the queue and play them in sequence.
 - **Playback Controls**: Pause, resume, or skip tracks.
 - **History**: View previously played tracks.
@@ -134,12 +135,23 @@ PakoDJ supports playing music from Spotify URLs! When you provide a Spotify trac
 - **Albums**: `https://open.spotify.com/album/...` (plays first track)
 - **Playlists**: `https://open.spotify.com/playlist/...` (plays first track)
 
+## 🎵 SoundCloud Support
+
+PakoDJ also supports playing music directly from SoundCloud! The bot automatically detects SoundCloud URLs and uses enhanced streaming technology to handle HLS audio formats.
+
+### Supported SoundCloud URLs:
+- **Tracks**: `https://soundcloud.com/artist/track-name`
+- **Short URLs**: `https://snd.sc/...`
+- **Mobile URLs**: `https://m.soundcloud.com/...`
+
+**Note**: SoundCloud support works out of the box - no additional configuration needed! The bot automatically optimizes FFmpeg settings for SoundCloud's HLS streaming format.
+
 ## 📖 Command
 
 | Command                | Description                                                                                                         |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `!play <query>`        | Plays a song searched using keywords, YouTube links, or Spotify URLs. If a song is already playing, adds it to the queue. |
-| `!repeat <n> <query>`  | Plays a song in loop for n times. Supports YouTube and Spotify URLs (use `!skip all` to stop the loop).           |
+| `!play <query>`        | Plays a song searched using keywords, YouTube links, Spotify URLs, or SoundCloud URLs. If a song is already playing, adds it to the queue. |
+| `!repeat <n> <query>`  | Plays a song in loop for n times. Supports YouTube, Spotify, and SoundCloud URLs (use `!skip all` to stop the loop). |
 | `!skip`                | Skips the current track and plays the next one in the queue.                                                        |
 | `!skip all`            | Skips the current track and the loop; then it plays the next track in queue.     |
 | `!pause`               | Pauses the currently playing track.                                                                                  |
@@ -153,6 +165,7 @@ PakoDJ supports playing music from Spotify URLs! When you provide a Spotify trac
 ## 🛠️ How It Works
 - **Search and Playback**: The bot uses `yt-dlp` to fetch the best available audio from YouTube.
 - **Spotify Integration**: When a Spotify URL is provided, the bot extracts track information and searches for it on YouTube.
+- **SoundCloud Support**: Direct streaming from SoundCloud with optimized FFmpeg settings for HLS audio formats.
 - **Dynamic Management**: Each server has its own queue and playback history.
 - **Automatic Connection**: The bot automatically connects to the voice channel of the user issuing a command.
 ## 🐛 Troubleshooting
