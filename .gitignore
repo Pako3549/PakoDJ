@@ -1,3 +1,4 @@
 .env
 youtube_cookies.txt
 logs
+.cache

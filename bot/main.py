@@ -6,9 +6,26 @@ import re
 import asyncio
 from discord import FFmpegPCMAudio
 from dotenv import load_dotenv
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 
 # Load environmental variables
 load_dotenv()
+
+# Initialize Spotify client (optional)
+spotify_client = None
+try:
+    client_id = os.getenv('SPOTIFY_CLIENT_ID')
+    client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
+    if client_id and client_secret:
+        client_credentials_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
+        spotify_client = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+        print("Spotify integration enabled")
+    else:
+        print("Spotify credentials not found - Spotify URLs will not be supported")
+except Exception as e:
+    print(f"Error initializing Spotify client: {e}")
+    spotify_client = None
 
 # Intents and bot configs
 intents = discord.Intents.default()
@@ -77,6 +94,71 @@ def search_youtube(query):
         print(f"Error searching on YouTube: {e}")
         return None, None, None
 
+# Function to check if URL is a Spotify URL
+def is_spotify_url(url):
+    spotify_patterns = [
+        r'spotify\.com/(track|album|playlist|artist)/',
+        r'open\.spotify\.com/(track|album|playlist|artist)/'
+    ]
+    return any(re.search(pattern, url) for pattern in spotify_patterns)
+
+# Function to extract Spotify track information and search on YouTube
+def get_spotify_track_info(url):
+    if not spotify_client:
+        print("Spotify client not initialized")
+        return None, None, None
+    
+    try:
+        # Extract track ID from URL
+        if 'track/' in url:
+            track_id = url.split('track/')[-1].split('?')[0]
+            track = spotify_client.track(track_id)
+            
+            # Create search query for YouTube
+            artist_names = ', '.join([artist['name'] for artist in track['artists']])
+            search_query = f"{artist_names} - {track['name']}"
+            
+            print(f"Searching YouTube for: {search_query}")
+            return search_youtube(search_query)
+            
+        elif 'album/' in url:
+            album_id = url.split('album/')[-1].split('?')[0]
+            album = spotify_client.album(album_id)
+            if album['tracks']['items']:
+                first_track = album['tracks']['items'][0]
+                artist_names = ', '.join([artist['name'] for artist in first_track['artists']])
+                search_query = f"{artist_names} - {first_track['name']}"
+                print(f"Playing first track from album: {search_query}")
+                return search_youtube(search_query)
+                
+        elif 'playlist/' in url:
+            # For playlists, we'll just play the first track
+            playlist_id = url.split('playlist/')[-1].split('?')[0]
+            playlist = spotify_client.playlist(playlist_id)
+            if playlist['tracks']['items']:
+                first_track = playlist['tracks']['items'][0]['track']
+                if first_track:
+                    artist_names = ', '.join([artist['name'] for artist in first_track['artists']])
+                    search_query = f"{artist_names} - {first_track['name']}"
+                    print(f"Playing first track from playlist: {search_query}")
+                    return search_youtube(search_query)
+                    
+        return None, None, None
+        
+    except Exception as e:
+        print(f"Error processing Spotify URL: {e}")
+        return None, None, None
+
+# Enhanced function to get audio stream URL (supports Spotify)
+def get_enhanced_audio_info(query):
+    if query.startswith("http://") or query.startswith("https://"):
+        if is_spotify_url(query):
+            return get_spotify_track_info(query)
+        else:
+            return get_audio_stream_url(query)
+    else:
+        return search_youtube(query)
+
 # Callback function to manage audio reproduction errors
 def after_playing(error, guild_id):
     if error:
@@ -133,8 +215,8 @@ async def custom_help(ctx):
     help_message = """
 **PakoDJ Bot Commands:**
 - `!join` - Joins user's voice channel
-- `!play` - Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).
-- `!repeat` - Plays a song in loop for n times (use `!skip all` to stop the loop).
+- `!play` - Plays an audio track searched by keywords, YouTube link, or Spotify URL (if a song is currently playing, adds the searched song in a queue).
+- `!repeat` - Plays a song in loop for n times. Supports YouTube and Spotify URLs (use `!skip all` to stop the loop).
 - `!skip` - Stops current audio track and plays the next one in the queue.
 - `!skip all` - Skips the current track and the loop; then it plays the next track in queue.
 - `!pause` - Pauses currently playing audio track.
@@ -167,15 +249,12 @@ async def join(ctx):
         print(f"Unexpected error: {e}")
 
 # Command to reproduce audio
-@bot.command(help = "Plays an audio track searched by keywords or link (if a song is currently playing, adds the searched song in a queue).")
+@bot.command(help = "Plays an audio track searched by keywords, YouTube link, or Spotify URL (if a song is currently playing, adds the searched song in a queue).")
 async def play(ctx, *, query: str):
     global track_counter
     try:
         if ctx.author.voice:
-            if query.startswith("http://") or query.startswith("https://"):
-                stream_url, title, video_url = get_audio_stream_url(query)
-            else:
-                stream_url, title, video_url = search_youtube(query)
+            stream_url, title, video_url = get_enhanced_audio_info(query)
 
             if stream_url is None:
                 await ctx.send("Unable to retrieve audio stream.")
@@ -198,7 +277,7 @@ async def play(ctx, *, query: str):
         print(f"Error: {e}")
 
 # Command to play a track in loop
-@bot.command(help="Plays an audio track in loop for n times (use `!skip all` to stop).")
+@bot.command(help="Plays an audio track in loop for n times. Supports YouTube and Spotify URLs (use `!skip all` to stop).")
 async def repeat(ctx, n: int, *, query: str):
     global track_counter
     try:
@@ -207,10 +286,7 @@ async def repeat(ctx, n: int, *, query: str):
                 await ctx.send("Please choose a number greater than 0.")
                 return
 
-            if query.startswith("http://") or query.startswith("https://"):
-                stream_url, title, video_url = get_audio_stream_url(query)
-            else:
-                stream_url, title, video_url = search_youtube(query)
+            stream_url, title, video_url = get_enhanced_audio_info(query)
 
             if stream_url is None:
                 await ctx.send("Unable to retrieve audio stream.")

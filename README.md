@@ -12,6 +12,7 @@
 **PakoDJ** is a Discord bot written in Python that lets you play music directly in your server's voice channels. With its features, you can search for songs on YouTube, manage music queues, view playback history, and much more!
 ## 🛠️ Main Features
 - **Music Playback**: Search and play songs from YouTube via links or keywords.
+- **Spotify Integration**: Play music from Spotify URLs (tracks, albums, playlists) by searching on YouTube.
 - **Queue Management**: Add songs to the queue and play them in sequence.
 - **Playback Controls**: Pause, resume, or skip tracks.
 - **History**: View previously played tracks.
@@ -26,11 +27,13 @@
 - **Python 3.8 or higher** installed
 - **ffmpeg** installed
 - A Discord bot token (you can obtain one from the [Discord Developer Portal](https://discord.com/developers/applications))
+- **Optional**: Spotify API credentials for Spotify URL support (get them from [Spotify Developer Dashboard](https://developer.spotify.com/dashboard))
 - The following Python libraries installed:
     - `discord.py`
     - `yt-dlp`
     - `python-dotenv`
     - `PyNaCl`
+    - `spotipy`
 ## ⚙️ Setup
 
 ### 🐳 Docker Setup (Recommended)
@@ -42,6 +45,9 @@
 2. **Configure the `.env` file**: Create a `.env` file in the `bot/` directory:
     ```env
     token=YOUR_BOT_TOKEN
+    # Optional: For Spotify URL support
+    SPOTIFY_CLIENT_ID=YOUR_SPOTIFY_CLIENT_ID
+    SPOTIFY_CLIENT_SECRET=YOUR_SPOTIFY_CLIENT_SECRET
     ```
 3. **Run the bot**:
     ```bash
@@ -67,6 +73,9 @@ docker-compose -f docker-compose.build.yml up -d
 3. **Configure the `.env` file**: Create a `.env` file in the `bot/` directory and add your bot token:
     ```env
     token=YOUR_BOT_TOKEN
+    # Optional: For Spotify URL support
+    SPOTIFY_CLIENT_ID=YOUR_SPOTIFY_CLIENT_ID
+    SPOTIFY_CLIENT_SECRET=YOUR_SPOTIFY_CLIENT_SECRET
     ```
 4. **Run the bot**:
     ```bash
@@ -101,12 +110,36 @@ After extracting your cookies, save them in a text file named `youtube_cookies.t
 
 This is required only for playing age-restricted content; for normal videos, no cookies are needed.
 
+## 🎵 Spotify Integration
+
+PakoDJ supports playing music from Spotify URLs! When you provide a Spotify track, album, or playlist URL, the bot will:
+1. Extract the track information from Spotify
+2. Search for the track on YouTube
+3. Play the audio from YouTube (avoiding DRM restrictions)
+
+### Setting Up Spotify Integration:
+1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+2. Create a new app (or use an existing one)
+3. Copy your **Client ID** and **Client Secret**
+4. Add them to your `.env` file:
+   ```env
+   SPOTIFY_CLIENT_ID=your_client_id_here
+   SPOTIFY_CLIENT_SECRET=your_client_secret_here
+   ```
+
+**Note**: Spotify integration is optional. The bot works perfectly fine without it, but you won't be able to use Spotify URLs.
+
+### Supported Spotify URLs:
+- **Tracks**: `https://open.spotify.com/track/...`
+- **Albums**: `https://open.spotify.com/album/...` (plays first track)
+- **Playlists**: `https://open.spotify.com/playlist/...` (plays first track)
+
 ## 📖 Command
 
 | Command                | Description                                                                                                         |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `!play <query>`        | Plays a song searched using keywords or a link. If a song is already playing, adds it to the queue.                 |
-| `!repeat <n> <query>`  | Plays a song in loop for n times (use `!skip all` to stop the loop).                                                    |
+| `!play <query>`        | Plays a song searched using keywords, YouTube links, or Spotify URLs. If a song is already playing, adds it to the queue. |
+| `!repeat <n> <query>`  | Plays a song in loop for n times. Supports YouTube and Spotify URLs (use `!skip all` to stop the loop).           |
 | `!skip`                | Skips the current track and plays the next one in the queue.                                                        |
 | `!skip all`            | Skips the current track and the loop; then it plays the next track in queue.     |
 | `!pause`               | Pauses the currently playing track.                                                                                  |
@@ -119,6 +152,7 @@ This is required only for playing age-restricted content; for normal videos, no 
 
 ## 🛠️ How It Works
 - **Search and Playback**: The bot uses `yt-dlp` to fetch the best available audio from YouTube.
+- **Spotify Integration**: When a Spotify URL is provided, the bot extracts track information and searches for it on YouTube.
 - **Dynamic Management**: Each server has its own queue and playback history.
 - **Automatic Connection**: The bot automatically connects to the voice channel of the user issuing a command.
 ## 🐛 Troubleshooting

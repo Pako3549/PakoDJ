@@ -2,3 +2,4 @@
 PyNaCl
 yt-dlp
 python-dotenv
+spotipy
