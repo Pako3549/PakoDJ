@@ -65,6 +65,7 @@ def get_audio_stream_url(url):
         ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True,
+            'extractor_args': {'youtube': {'player_client': ['default', '-tv_simply']}},
         }
         
         # Special handling for SoundCloud - use RAM disk to avoid SD card wear
@@ -79,7 +80,8 @@ def get_audio_stream_url(url):
                 'outtmpl': f'{ram_dir}/%(title)s.%(ext)s',
                 'extractaudio': True,
                 'audioformat': 'mp3',
-                'audioquality': '128K'  # Reduced quality to save RAM/storage
+                'audioquality': '128K',  # Reduced quality to save RAM/storage
+                'extractor_args': {'youtube': {'player_client': ['default', '-tv_simply']}},
             })
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -115,6 +117,7 @@ def search_youtube(query):
             'quiet': True,
             'default_search': 'ytsearch',
             'max_downloads': 1,
+            'extractor_args': {'youtube': {'player_client': ['default', '-tv_simply']}},
         }
         if os.path.isfile('youtube_cookies.txt'):
             ydl_opts['cookiefile'] = 'youtube_cookies.txt'
