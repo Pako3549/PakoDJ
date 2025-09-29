@@ -70,8 +70,6 @@ def get_audio_stream_url(url):
         # Special handling for SoundCloud - use RAM disk to avoid SD card wear
         if is_soundcloud_url(url):
             # Use /dev/shm (RAM disk) instead of /tmp to avoid SD card writes
-            import tempfile
-            import os
             
             # Try to use RAM disk first, fallback to /tmp if not available
             ram_dir = '/dev/shm' if os.path.exists('/dev/shm') and os.access('/dev/shm', os.W_OK) else '/tmp'
