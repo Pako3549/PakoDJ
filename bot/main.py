@@ -8,7 +8,6 @@ from discord import FFmpegPCMAudio
 from dotenv import load_dotenv
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
-import tempfile
 
 # Load environmental variables
 load_dotenv()
@@ -71,6 +70,8 @@ def get_audio_stream_url(url):
         # Special handling for SoundCloud - use RAM disk to avoid SD card wear
         if is_soundcloud_url(url):
             # Use /dev/shm (RAM disk) instead of /tmp to avoid SD card writes
+            import tempfile
+            import os
             
             # Try to use RAM disk first, fallback to /tmp if not available
             ram_dir = '/dev/shm' if os.path.exists('/dev/shm') and os.access('/dev/shm', os.W_OK) else '/tmp'
@@ -132,8 +133,7 @@ def search_youtube(query):
 def is_spotify_url(url):
     spotify_patterns = [
         r'spotify\.com/(track|album|playlist|artist)/',
-        r'open\.spotify\.com/(track|album|playlist|artist)/',
-        r'open\.spotify\.com/intl-[a-z]{2}/(track|album|playlist|artist)/'  # Support international URLs
+        r'open\.spotify\.com/(track|album|playlist|artist)/'
     ]
     return any(re.search(pattern, url) for pattern in spotify_patterns)
 
@@ -197,11 +197,7 @@ def is_soundcloud_url(url):
 def get_enhanced_audio_info(query):
     if query.startswith("http://") or query.startswith("https://"):
         if is_spotify_url(query):
-            print(f"Detected Spotify URL: {query}")
-            result = get_spotify_track_info(query)
-            if result[0] is None:
-                print("Spotify track info failed, check if Spotify credentials are configured")
-            return result
+            return get_spotify_track_info(query)
         else:
             return get_audio_stream_url(query)
     else:
