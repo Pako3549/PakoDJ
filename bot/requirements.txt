@@ -1,5 +1,5 @@
 ﻿discord.py
 PyNaCl
-yt-dlp
+yt-dlp[default] @ git+https://github.com/yt-dlp/yt-dlp@master
 python-dotenv
 spotipy
