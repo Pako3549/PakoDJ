@@ -67,7 +67,7 @@ def get_audio_stream_url(url):
         ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True,
-            'extractor_args': {'youtube': {'player_client': ['android', 'tv_embedded']}},
+            'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
         }
         
         # Special handling for SoundCloud - use RAM disk to avoid SD card wear
@@ -83,7 +83,7 @@ def get_audio_stream_url(url):
                 'extractaudio': True,
                 'audioformat': 'mp3',
                 'audioquality': '128K',  # Reduced quality to save RAM/storage
-                'extractor_args': {'youtube': {'player_client': ['android', 'tv_embedded']}},
+                'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
             })
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -119,7 +119,7 @@ def search_youtube(query):
             'quiet': True,
             'default_search': 'ytsearch',
             'max_downloads': 1,
-            'extractor_args': {'youtube': {'player_client': ['android', 'tv_embedded']}},
+            'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
         }
         if os.path.isfile('youtube_cookies.txt'):
             ydl_opts['cookiefile'] = 'youtube_cookies.txt'
@@ -281,7 +281,7 @@ def get_spotify_track_info(url):
         return None, None, None
 
 # Async function to load playlist tracks in background
-async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collection_type, collection_id):
+async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collection_type, collection_id, status_msg):
     global track_counter
     server_info = get_server_info(ctx.guild.id)
     lock = get_server_lock(ctx.guild.id)
@@ -292,13 +292,33 @@ async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collecti
     
     for i, search_query in enumerate(tracks_list):
         try:
-            # Run sync search in thread to avoid blocking
-            loop = asyncio.get_event_loop()
-            stream_url, title, video_url = await loop.run_in_executor(None, search_youtube_with_fallback, search_query)
+            # Retry logic for network errors
+            max_retries = 3
+            retry_count = 0
+            stream_url, title, video_url = None, None, None
+            
+            while retry_count < max_retries:
+                try:
+                    # Run sync search in thread to avoid blocking
+                    loop = asyncio.get_event_loop()
+                    stream_url, title, video_url = await loop.run_in_executor(None, search_youtube_with_fallback, search_query)
+                    break  # Success, exit retry loop
+                except Exception as search_error:
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        print(f"Retry {retry_count}/{max_retries} for track: {search_query}")
+                        await asyncio.sleep(1)  # Wait before retry
+                    else:
+                        print(f"Failed after {max_retries} retries: {search_query} - {search_error}")
             
             if stream_url is None:
                 print(f"Failed to find track: {search_query}")
                 failed_tracks += 1
+                # Update progress even for failed tracks
+                try:
+                    await status_msg.edit(content=f"Loading {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
+                except:
+                    pass
                 continue
             
             async with lock:
@@ -322,16 +342,35 @@ async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collecti
                     server_info['audio_queue'].append([track])
                     tracks_loaded += 1
             
-            # Rate limiting to avoid YouTube throttling
-            await asyncio.sleep(0.3)
+            # Update progress message
+            try:
+                await status_msg.edit(content=f"Loading {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
+            except:
+                pass
+            
+            # Rate limiting to avoid YouTube throttling (increased delay)
+            await asyncio.sleep(0.5)
             
         except asyncio.CancelledError:
             # Task was cancelled (skip all was called)
             print(f"Playlist loading cancelled after {tracks_loaded} tracks")
+            try:
+                await status_msg.edit(content=f"Loading cancelled. Added {tracks_loaded} tracks from {collection_type} **{collection_name}**.")
+            except:
+                pass
             return
         except Exception as e:
             print(f"Error loading track '{search_query}': {e}")
             failed_tracks += 1
+    
+    # Final status update
+    try:
+        result_msg = f"Added {tracks_loaded} tracks from {collection_type} **{collection_name}** to queue."
+        if failed_tracks > 0:
+            result_msg += f" ({failed_tracks} track(s) not found on YouTube)"
+        await status_msg.edit(content=result_msg)
+    except:
+        pass
     
     # Clear loading task reference when done
     server_info['loading_task'] = None
@@ -504,10 +543,13 @@ async def play(ctx, *, query: str):
                 # Generate unique collection ID for skip all functionality
                 collection_id = str(uuid.uuid4())
                 
+                # Create status message
+                status_msg = await ctx.send(f"Loading {collection_type} **{collection_name}**: 0/{len(tracks_list)} tracks...")
+                
                 # Start background task to load tracks and save reference
                 server_info = get_server_info(ctx.guild.id)
                 server_info['loading_task'] = asyncio.create_task(
-                    load_playlist_tracks_async(ctx, tracks_list, collection_name, collection_type, collection_id)
+                    load_playlist_tracks_async(ctx, tracks_list, collection_name, collection_type, collection_id, status_msg)
                 )
                 
                 return
