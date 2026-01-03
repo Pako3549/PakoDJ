@@ -6,6 +6,7 @@ import re
 import asyncio
 import time
 import uuid
+import random
 from discord import FFmpegPCMAudio
 from dotenv import load_dotenv
 import spotipy
@@ -134,18 +135,33 @@ def search_youtube(query):
                 print(f"No results found for query: '{query}'")
                 return None, None, None
     except Exception as e:
-        print(f"Error searching on YouTube for '{query}': {e}")
+        error_msg = str(e).lower()
+        # Check for blocking errors
+        if any(keyword in error_msg for keyword in ['sign in', 'authentication', 'challenge', 'cookies required', 'n challenge']):
+            print(f"Blocking error for '{query}': Skipping (authentication/challenge required)")
+            # Raise special exception to stop fallback attempts
+            raise BlockingError(f"Authentication or challenge required: {e}")
+        else:
+            print(f"Error searching on YouTube for '{query}': {e}")
         return None, None, None
+
+# Custom exception for blocking errors
+class BlockingError(Exception):
+    pass
 
 # Enhanced search with fallback queries
 def search_youtube_with_fallback(original_query):
-
-    # Try the original query first
-    result = search_youtube(original_query)
-    if result[0] is not None:
-        return result
+    try:
+        # Try the original query first
+        result = search_youtube(original_query)
+        if result[0] is not None:
+            return result
+    except BlockingError:
+        # Blocking error, don't try fallbacks
+        print(f"Skipping fallback attempts for '{original_query}' due to blocking error")
+        return None, None, None
     
-    # Generate alternative queries
+    # Generate alternative queries with random variations
     fallback_queries = []
     
     if ' - ' in original_query:
@@ -156,21 +172,26 @@ def search_youtube_with_fallback(original_query):
         parts = original_query.split(' - ')
         if len(parts) == 2:
             fallback_queries.append(f"{parts[1]} {parts[0]}")
+            # Also try with just title
+            fallback_queries.append(parts[1])
     
-    # Try adding common keywords that might help
-    fallback_queries.extend([
-        f"{original_query} official",
-        f"{original_query} music video",
-        f"{original_query} audio",
-        f"{original_query} lyrics"
-    ])
+    # Try adding common keywords that might help (randomize order)
+    keywords = ['official', 'music video', 'audio', 'lyrics', 'video']
+    random.shuffle(keywords)
+    for keyword in keywords[:3]:  # Use only 3 random keywords
+        fallback_queries.append(f"{original_query} {keyword}")
     
     # Try each fallback query
     for query in fallback_queries:
-        print(f"Trying fallback search: '{query}'")
-        result = search_youtube(query)
-        if result[0] is not None:
-            return result
+        try:
+            print(f"Trying fallback search: '{query}'")
+            result = search_youtube(query)
+            if result[0] is not None:
+                return result
+        except BlockingError:
+            # Stop all fallback attempts on blocking error
+            print(f"Blocking error encountered, stopping all fallback attempts")
+            return None, None, None
     
     print(f"All search attempts failed for: '{original_query}'")
     return None, None, None
@@ -292,24 +313,9 @@ async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collecti
     
     for i, search_query in enumerate(tracks_list):
         try:
-            # Retry logic for network errors
-            max_retries = 3
-            retry_count = 0
-            stream_url, title, video_url = None, None, None
-            
-            while retry_count < max_retries:
-                try:
-                    # Run sync search in thread to avoid blocking
-                    loop = asyncio.get_event_loop()
-                    stream_url, title, video_url = await loop.run_in_executor(None, search_youtube_with_fallback, search_query)
-                    break  # Success, exit retry loop
-                except Exception as search_error:
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        print(f"Retry {retry_count}/{max_retries} for track: {search_query}")
-                        await asyncio.sleep(1)  # Wait before retry
-                    else:
-                        print(f"Failed after {max_retries} retries: {search_query} - {search_error}")
+            # Run sync search in thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            stream_url, title, video_url = await loop.run_in_executor(None, search_youtube_with_fallback, search_query)
             
             if stream_url is None:
                 print(f"Failed to find track: {search_query}")
@@ -360,8 +366,15 @@ async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collecti
                 pass
             return
         except Exception as e:
-            print(f"Error loading track '{search_query}': {e}")
+            # Log error but continue with next track
+            print(f"Unexpected error loading track '{search_query}': {e}")
             failed_tracks += 1
+            # Update progress even on error
+            try:
+                await status_msg.edit(content=f"Loading {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
+            except:
+                pass
+            continue
     
     # Final status update
     try:
