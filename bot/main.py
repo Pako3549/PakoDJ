@@ -136,8 +136,7 @@ def search_youtube(query):
 
 # Enhanced search with fallback queries
 def search_youtube_with_fallback(original_query):
-    """Try multiple search variations if the first one fails"""
-    
+
     # Try the original query first
     result = search_youtube(original_query)
     if result[0] is not None:
@@ -185,6 +184,66 @@ def is_spotify_url(url):
     ]
     return any(re.search(pattern, url) for pattern in spotify_patterns)
 
+# Function to extract all tracks from Spotify playlist or album
+def get_spotify_tracks_list(url):
+
+    if not spotify_client:
+        print("Spotify client not initialized - check SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables")
+        return None
+    
+    try:
+        print(f"Processing Spotify URL for multiple tracks: {url}")
+        tracks_list = []
+        collection_name = ""
+        
+        if 'album/' in url:
+            album_id = url.split('album/')[-1].split('?')[0].split('&')[0]
+            print(f"Extracted album ID: {album_id}")
+            
+            album = spotify_client.album(album_id)
+            collection_name = album['name']
+            
+            for track in album['tracks']['items']:
+                artist_names = ', '.join([artist['name'] for artist in track['artists']])
+                search_query = f"{artist_names} - {track['name']}"
+                tracks_list.append(search_query)
+            
+            print(f"Found {len(tracks_list)} tracks in album '{collection_name}'")
+            return tracks_list, collection_name, 'album'
+                
+        elif 'playlist/' in url:
+            playlist_id = url.split('playlist/')[-1].split('?')[0].split('&')[0]
+            print(f"Extracted playlist ID: {playlist_id}")
+            
+            playlist = spotify_client.playlist(playlist_id)
+            collection_name = playlist['name']
+            
+            # Handle paginated results
+            results = playlist['tracks']
+            tracks = results['items']
+            
+            while results['next']:
+                results = spotify_client.next(results)
+                tracks.extend(results['items'])
+            
+            for item in tracks:
+                track = item['track']
+                if track and track['name']:  # Skip null/unavailable tracks
+                    artist_names = ', '.join([artist['name'] for artist in track['artists']])
+                    search_query = f"{artist_names} - {track['name']}"
+                    tracks_list.append(search_query)
+            
+            print(f"Found {len(tracks_list)} tracks in playlist '{collection_name}'")
+            return tracks_list, collection_name, 'playlist'
+        
+        return None
+        
+    except Exception as e:
+        print(f"Error extracting tracks from Spotify URL '{url}': {e}")
+        import traceback
+        print(f"Full traceback: {traceback.format_exc()}")
+        return None
+
 # Function to extract Spotify track information and search on YouTube
 def get_spotify_track_info(url):
     if not spotify_client:
@@ -208,47 +267,10 @@ def get_spotify_track_info(url):
             print(f"Spotify track found: {track['name']} by {artist_names}")
             print(f"Searching YouTube for: {search_query}")
             return search_youtube_with_fallback(search_query)
-            
-        elif 'album/' in url:
-            album_id = url.split('album/')[-1].split('?')[0].split('&')[0]
-            print(f"Extracted album ID: {album_id}")
-            
-            album = spotify_client.album(album_id)
-            if album['tracks']['items']:
-                first_track = album['tracks']['items'][0]
-                artist_names = ', '.join([artist['name'] for artist in first_track['artists']])
-                search_query = f"{artist_names} - {first_track['name']}"
-                print(f"Playing first track from album '{album['name']}': {search_query}")
-                return search_youtube_with_fallback(search_query)
-            else:
-                print(f"No tracks found in album: {album['name']}")
-                return None, None, None
-                
-        elif 'playlist/' in url:
-            # For playlists, we'll just play the first track
-            playlist_id = url.split('playlist/')[-1].split('?')[0].split('&')[0]
-            print(f"Extracted playlist ID: {playlist_id}")
-            
-            playlist = spotify_client.playlist(playlist_id)
-            if playlist['tracks']['items']:
-                first_track = playlist['tracks']['items'][0]['track']
-                if first_track:
-                    artist_names = ', '.join([artist['name'] for artist in first_track['artists']])
-                    search_query = f"{artist_names} - {first_track['name']}"
-                    print(f"Playing first track from playlist '{playlist['name']}': {search_query}")
-                    return search_youtube_with_fallback(search_query)
-                else:
-                    print(f"First track in playlist '{playlist['name']}' is not available")
-                    return None, None, None
-            else:
-                print(f"No tracks found in playlist: {playlist['name']}")
-                return None, None, None
         else:
-            print(f"Unsupported Spotify URL type: {url}")
+            print(f"Unsupported Spotify URL type (use get_spotify_tracks_list for playlists/albums): {url}")
             return None, None, None
                     
-        return None, None, None
-        
     except Exception as e:
         print(f"Error processing Spotify URL '{url}': {e}")
         import traceback
@@ -360,7 +382,7 @@ async def custom_help(ctx):
     help_message = """
 **PakoDJ Bot Commands:**
 - `!join` - Joins user's voice channel
-- `!play` - Plays an audio track searched by keywords, YouTube link, Spotify URL, or SoundCloud URL (if a song is currently playing, adds the searched song in a queue).
+- `!play` - Plays an audio track searched by keywords, YouTube link, Spotify URL (track/album/playlist), or SoundCloud URL (if a song is currently playing, adds the searched song in a queue).
 - `!repeat` - Plays a song in loop for n times. Supports YouTube, Spotify, and SoundCloud URLs (use `!skip all` to stop the loop).
 - `!skip` - Stops current audio track and plays the next one in the queue.
 - `!skip all` - Skips the current track and the loop; then it plays the next track in queue.
@@ -394,24 +416,102 @@ async def join(ctx):
         print(f"Unexpected error: {e}")
 
 # Command to reproduce audio
-@bot.command(help = "Plays an audio track searched by keywords, YouTube link, Spotify URL, or SoundCloud URL (if a song is currently playing, adds the searched song in a queue).")
+@bot.command(help = "Plays an audio track searched by keywords, YouTube link, Spotify URL, or SoundCloud URL. Supports full Spotify playlists and albums (if a song is currently playing, adds the searched song in a queue).")
 async def play(ctx, *, query: str):
     global track_counter
     try:
         if ctx.author.voice:
+            # Check if it's a Spotify playlist or album
+            if is_spotify_url(query) and ('playlist/' in query or 'album/' in query):
+                search_msg = await ctx.send("Loading Spotify playlist/album...")
+                
+                tracks_result = get_spotify_tracks_list(query)
+                
+                if tracks_result is None:
+                    error_msg = "Unable to retrieve playlist/album."
+                    if not spotify_client:
+                        error_msg += "\nPossible issues:\n- Spotify credentials not configured\n- Check SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables"
+                    
+                    try:
+                        await search_msg.delete()
+                    except:
+                        pass
+                    
+                    await ctx.send(error_msg)
+                    return
+                
+                tracks_list, collection_name, collection_type = tracks_result
+                
+                if not tracks_list:
+                    await search_msg.edit(content=f"No tracks found in {collection_type}: {collection_name}")
+                    return
+                
+                await search_msg.edit(content=f"Adding {len(tracks_list)} tracks from {collection_type} **{collection_name}** to queue...")
+                
+                server_info = get_server_info(ctx.guild.id)
+                lock = get_server_lock(ctx.guild.id)
+                
+                # Process tracks and add them to queue
+                tracks_to_queue = []
+                failed_tracks = 0
+                
+                for i, search_query in enumerate(tracks_list):
+                    stream_url, title, video_url = search_youtube_with_fallback(search_query)
+                    
+                    if stream_url is None:
+                        print(f"Failed to find track: {search_query}")
+                        failed_tracks += 1
+                        continue
+                    
+                    async with lock:
+                        track_counter += 1
+                        track = {'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url, 'track_number': track_counter}
+                        tracks_to_queue.append(track)
+                    
+                    # Update progress every 5 tracks
+                    if (i + 1) % 5 == 0:
+                        await search_msg.edit(content=f"Processing {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
+                
+                # Add all tracks to queue or start playing
+                async with lock:
+                    if ctx.voice_client and ctx.voice_client.is_playing():
+                        # Add as individual tracks to queue
+                        for track in tracks_to_queue:
+                            server_info['audio_queue'].append([track])
+                        result_msg = f"Added {len(tracks_to_queue)} tracks from {collection_type} **{collection_name}** to queue."
+                    else:
+                        # Play first track and queue the rest
+                        if tracks_to_queue:
+                            first_track = tracks_to_queue[0]
+                            await play_audio(first_track['ctx'], first_track['url'], first_track['title'], first_track['video_url'])
+                            
+                            # Queue remaining tracks
+                            for track in tracks_to_queue[1:]:
+                                server_info['audio_queue'].append([track])
+                            
+                            result_msg = f"Playing {collection_type} **{collection_name}** ({len(tracks_to_queue)} tracks)."
+                    
+                    if failed_tracks > 0:
+                        result_msg += f"\n{failed_tracks} track(s) could not be found on YouTube."
+                    
+                    await search_msg.edit(content=result_msg)
+                
+                return
+            
+            # Handle single track (original logic)
             # Send a "searching" message for Spotify URLs to give user feedback
             if is_spotify_url(query):
-                search_msg = await ctx.send("🔍 Searching Spotify track on YouTube...")
+                search_msg = await ctx.send("Searching Spotify track on YouTube...")
             
             stream_url, title, video_url = get_enhanced_audio_info(query)
 
             if stream_url is None:
-                error_msg = "❌ Unable to retrieve audio stream."
+                error_msg = "Unable to retrieve audio stream."
                 if is_spotify_url(query):
                     if not spotify_client:
-                        error_msg += "\n**Possible issues:**\n• Spotify credentials not configured\n• Check SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables"
+                        error_msg += "\nPossible issues:\n- Spotify credentials not configured\n- Check SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables"
                     else:
-                        error_msg += "\n**Possible issues:**\n• Track not found on YouTube\n• Track may be region-locked\n• Try searching manually with artist and song name"
+                        error_msg += "\nPossible issues:\n- Track not found on YouTube\n- Track may be region-locked\n- Try searching manually with artist and song name"
                 
                 # Delete the searching message if it exists
                 if is_spotify_url(query) and 'search_msg' in locals():

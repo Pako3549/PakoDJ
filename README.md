@@ -12,7 +12,7 @@
 **PakoDJ** is a Discord bot written in Python that lets you play music directly in your server's voice channels. With its features, you can search for songs on YouTube, manage music queues, view playback history, and much more!
 ## 🛠️ Main Features
 - **Music Playback**: Search and play songs from YouTube via links or keywords.
-- **Spotify Integration**: Play music from Spotify URLs (tracks, albums, playlists) by searching on YouTube.
+- **Spotify Integration**: Play music from Spotify URLs (tracks, albums, playlists) by searching on YouTube. Full playlist and album support with automatic queueing.
 - **SoundCloud Support**: Play music directly from SoundCloud URLs with enhanced HLS streaming support.
 - **Queue Management**: Add songs to the queue and play them in sequence.
 - **Playback Controls**: Pause, resume, or skip tracks.
@@ -115,8 +115,10 @@ This is required only for playing age-restricted content; for normal videos, no 
 
 PakoDJ supports playing music from Spotify URLs! When you provide a Spotify track, album, or playlist URL, the bot will:
 1. Extract the track information from Spotify
-2. Search for the track on YouTube
+2. Search for the track(s) on YouTube
 3. Play the audio from YouTube (avoiding DRM restrictions)
+
+**Full Playlist & Album Support**: When you provide a Spotify playlist or album URL, the bot will automatically load all tracks and add them to the queue!
 
 ### Setting Up Spotify Integration:
 1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
@@ -131,9 +133,9 @@ PakoDJ supports playing music from Spotify URLs! When you provide a Spotify trac
 **Note**: Spotify integration is optional. The bot works perfectly fine without it, but you won't be able to use Spotify URLs.
 
 ### Supported Spotify URLs:
-- **Tracks**: `https://open.spotify.com/track/...`
-- **Albums**: `https://open.spotify.com/album/...` (plays first track)
-- **Playlists**: `https://open.spotify.com/playlist/...` (plays first track)
+- **Tracks**: `https://open.spotify.com/track/...` - plays the single track
+- **Albums**: `https://open.spotify.com/album/...` - plays all tracks from the album
+- **Playlists**: `https://open.spotify.com/playlist/...` - plays all tracks from the playlist
 
 ## 🎵 SoundCloud Support
 
