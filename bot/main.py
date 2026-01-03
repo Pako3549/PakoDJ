@@ -4,6 +4,8 @@ from discord.ext import commands
 import yt_dlp
 import re
 import asyncio
+import time
+import uuid
 from discord import FFmpegPCMAudio
 from dotenv import load_dotenv
 import spotipy
@@ -47,7 +49,8 @@ def get_server_info(guild_id):
         server_playback_info[guild_id] = {
             'current_track': None,
             'audio_queue': [], 
-            'playback_history': []
+            'playback_history': [],
+            'loading_task': None  # Track background loading task
         }
     return server_playback_info[guild_id]
 
@@ -64,7 +67,7 @@ def get_audio_stream_url(url):
         ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True,
-            'extractor_args': {'youtube': {'player_client': ['default', '-tv_simply']}},
+            'extractor_args': {'youtube': {'player_client': ['ios', 'web']}},
         }
         
         # Special handling for SoundCloud - use RAM disk to avoid SD card wear
@@ -80,7 +83,7 @@ def get_audio_stream_url(url):
                 'extractaudio': True,
                 'audioformat': 'mp3',
                 'audioquality': '128K',  # Reduced quality to save RAM/storage
-                'extractor_args': {'youtube': {'player_client': ['default', '-tv_simply']}},
+                'extractor_args': {'youtube': {'player_client': ['ios', 'web']}},
             })
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -116,7 +119,7 @@ def search_youtube(query):
             'quiet': True,
             'default_search': 'ytsearch',
             'max_downloads': 1,
-            'extractor_args': {'youtube': {'player_client': ['default', '-tv_simply']}},
+            'extractor_args': {'youtube': {'player_client': ['ios', 'web']}},
         }
         if os.path.isfile('youtube_cookies.txt'):
             ydl_opts['cookiefile'] = 'youtube_cookies.txt'
@@ -277,6 +280,62 @@ def get_spotify_track_info(url):
         print(f"Full traceback: {traceback.format_exc()}")
         return None, None, None
 
+# Async function to load playlist tracks in background
+async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collection_type, collection_id):
+    global track_counter
+    server_info = get_server_info(ctx.guild.id)
+    lock = get_server_lock(ctx.guild.id)
+    
+    tracks_loaded = 0
+    failed_tracks = 0
+    first_track_played = False
+    
+    for i, search_query in enumerate(tracks_list):
+        try:
+            # Run sync search in thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            stream_url, title, video_url = await loop.run_in_executor(None, search_youtube_with_fallback, search_query)
+            
+            if stream_url is None:
+                print(f"Failed to find track: {search_query}")
+                failed_tracks += 1
+                continue
+            
+            async with lock:
+                track_counter += 1
+                track = {
+                    'ctx': ctx,
+                    'url': stream_url,
+                    'title': title,
+                    'video_url': video_url,
+                    'track_number': track_counter,
+                    'collection_id': collection_id  # Add collection ID for skip all
+                }
+                
+                # If it's the first track and nothing is playing, start immediately
+                if not first_track_played and (not ctx.voice_client or not ctx.voice_client.is_playing()):
+                    await play_audio(ctx, stream_url, title, video_url)
+                    first_track_played = True
+                    tracks_loaded += 1
+                else:
+                    # Add to queue
+                    server_info['audio_queue'].append([track])
+                    tracks_loaded += 1
+            
+            # Rate limiting to avoid YouTube throttling
+            await asyncio.sleep(0.3)
+            
+        except asyncio.CancelledError:
+            # Task was cancelled (skip all was called)
+            print(f"Playlist loading cancelled after {tracks_loaded} tracks")
+            return
+        except Exception as e:
+            print(f"Error loading track '{search_query}': {e}")
+            failed_tracks += 1
+    
+    # Clear loading task reference when done
+    server_info['loading_task'] = None
+
 # Function to check if URL is a SoundCloud URL
 def is_soundcloud_url(url):
     soundcloud_patterns = [
@@ -328,6 +387,9 @@ def after_playing(error, guild_id):
                     if not group:
                         server_info['audio_queue'].pop(0)
                     await play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url'])
+                    # Preserve collection_id in current_track
+                    if 'collection_id' in next_track:
+                        server_info['current_track']['collection_id'] = next_track['collection_id']
                     break
                 else:
                     server_info['audio_queue'].pop(0)
@@ -362,6 +424,7 @@ async def play_audio(ctx, stream_url, title, video_url):
     server_info['playback_history'].append({'title': title, 'video_url': video_url})
 
     # Set current track with temp file info for cleanup
+    # Note: collection_id is not passed here but maintained from next_track callback
     track_info = {'title': title, 'video_url': video_url}
     if is_temp_file:
         track_info['temp_file'] = stream_url
@@ -423,78 +486,29 @@ async def play(ctx, *, query: str):
         if ctx.author.voice:
             # Check if it's a Spotify playlist or album
             if is_spotify_url(query) and ('playlist/' in query or 'album/' in query):
-                search_msg = await ctx.send("Loading Spotify playlist/album...")
-                
                 tracks_result = get_spotify_tracks_list(query)
                 
                 if tracks_result is None:
                     error_msg = "Unable to retrieve playlist/album."
                     if not spotify_client:
                         error_msg += "\nPossible issues:\n- Spotify credentials not configured\n- Check SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables"
-                    
-                    try:
-                        await search_msg.delete()
-                    except:
-                        pass
-                    
                     await ctx.send(error_msg)
                     return
                 
                 tracks_list, collection_name, collection_type = tracks_result
                 
                 if not tracks_list:
-                    await search_msg.edit(content=f"No tracks found in {collection_type}: {collection_name}")
+                    await ctx.send(f"No tracks found in {collection_type}: {collection_name}")
                     return
                 
-                await search_msg.edit(content=f"Adding {len(tracks_list)} tracks from {collection_type} **{collection_name}** to queue...")
+                # Generate unique collection ID for skip all functionality
+                collection_id = str(uuid.uuid4())
                 
+                # Start background task to load tracks and save reference
                 server_info = get_server_info(ctx.guild.id)
-                lock = get_server_lock(ctx.guild.id)
-                
-                # Process tracks and add them to queue
-                tracks_to_queue = []
-                failed_tracks = 0
-                
-                for i, search_query in enumerate(tracks_list):
-                    stream_url, title, video_url = search_youtube_with_fallback(search_query)
-                    
-                    if stream_url is None:
-                        print(f"Failed to find track: {search_query}")
-                        failed_tracks += 1
-                        continue
-                    
-                    async with lock:
-                        track_counter += 1
-                        track = {'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url, 'track_number': track_counter}
-                        tracks_to_queue.append(track)
-                    
-                    # Update progress every 5 tracks
-                    if (i + 1) % 5 == 0:
-                        await search_msg.edit(content=f"Processing {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
-                
-                # Add all tracks to queue or start playing
-                async with lock:
-                    if ctx.voice_client and ctx.voice_client.is_playing():
-                        # Add as individual tracks to queue
-                        for track in tracks_to_queue:
-                            server_info['audio_queue'].append([track])
-                        result_msg = f"Added {len(tracks_to_queue)} tracks from {collection_type} **{collection_name}** to queue."
-                    else:
-                        # Play first track and queue the rest
-                        if tracks_to_queue:
-                            first_track = tracks_to_queue[0]
-                            await play_audio(first_track['ctx'], first_track['url'], first_track['title'], first_track['video_url'])
-                            
-                            # Queue remaining tracks
-                            for track in tracks_to_queue[1:]:
-                                server_info['audio_queue'].append([track])
-                            
-                            result_msg = f"Playing {collection_type} **{collection_name}** ({len(tracks_to_queue)} tracks)."
-                    
-                    if failed_tracks > 0:
-                        result_msg += f"\n{failed_tracks} track(s) could not be found on YouTube."
-                    
-                    await search_msg.edit(content=result_msg)
+                server_info['loading_task'] = asyncio.create_task(
+                    load_playlist_tracks_async(ctx, tracks_list, collection_name, collection_type, collection_id)
+                )
                 
                 return
             
@@ -599,17 +613,34 @@ async def skip(ctx, arg: str = None):
         if ctx.voice_client and ctx.voice_client.is_playing():
             if arg == "all":
                 current_title = server_info['current_track']['title'] if server_info['current_track'] else None
+                current_collection_id = server_info['current_track'].get('collection_id') if server_info['current_track'] else None
                 found = False
-                for i, group in enumerate(server_info['audio_queue']):
-                    if any(current_title and current_title.split(" (loop")[0] in t['title'] for t in group):
-                        server_info['audio_queue'].pop(i)
-                        found = True
-                        break
+                
+                # Cancel loading task if active
+                if server_info['loading_task'] and not server_info['loading_task'].done():
+                    server_info['loading_task'].cancel()
+                    server_info['loading_task'] = None
+                
+                # If current track has collection_id, remove all tracks with same collection_id
+                if current_collection_id:
+                    server_info['audio_queue'] = [
+                        group for group in server_info['audio_queue']
+                        if not any(t.get('collection_id') == current_collection_id for t in group)
+                    ]
+                    found = True
+                else:
+                    # Fallback to old behavior for repeat loops
+                    for i, group in enumerate(server_info['audio_queue']):
+                        if any(current_title and current_title.split(" (loop")[0] in t['title'] for t in group):
+                            server_info['audio_queue'].pop(i)
+                            found = True
+                            break
+                
                 ctx.voice_client.stop()
                 if found:
-                    await ctx.send("Skipped current track and the rest of the loop.")
+                    await ctx.send("Skipped current track and the rest of the playlist/loop.")
                 else:
-                    await ctx.send("Skipped current track (no loop found).")
+                    await ctx.send("Skipped current track (no playlist/loop found).")
             else:
                 ctx.voice_client.stop()
                 await ctx.send("Skipped current track.")

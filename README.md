@@ -12,7 +12,7 @@
 **PakoDJ** is a Discord bot written in Python that lets you play music directly in your server's voice channels. With its features, you can search for songs on YouTube, manage music queues, view playback history, and much more!
 ## 🛠️ Main Features
 - **Music Playback**: Search and play songs from YouTube via links or keywords.
-- **Spotify Integration**: Play music from Spotify URLs (tracks, albums, playlists) by searching on YouTube. Full playlist and album support with automatic queueing.
+- **Spotify Integration**: Play music from Spotify URLs (tracks, albums, playlists) by searching on YouTube. Full playlist and album support with automatic queueing and background loading for instant playback.
 - **SoundCloud Support**: Play music directly from SoundCloud URLs with enhanced HLS streaming support.
 - **Queue Management**: Add songs to the queue and play them in sequence.
 - **Playback Controls**: Pause, resume, or skip tracks.
@@ -118,7 +118,7 @@ PakoDJ supports playing music from Spotify URLs! When you provide a Spotify trac
 2. Search for the track(s) on YouTube
 3. Play the audio from YouTube (avoiding DRM restrictions)
 
-**Full Playlist & Album Support**: When you provide a Spotify playlist or album URL, the bot will automatically load all tracks and add them to the queue!
+**Full Playlist & Album Support**: When you provide a Spotify playlist or album URL, the bot will automatically start playing the first track immediately while loading the remaining tracks in the background. This ensures instant playback without delays, even for large playlists!
 
 ### Setting Up Spotify Integration:
 1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
@@ -155,7 +155,7 @@ PakoDJ also supports playing music directly from SoundCloud! The bot automatical
 | `!play <query>`        | Plays a song searched using keywords, YouTube links, Spotify URLs, or SoundCloud URLs. If a song is already playing, adds it to the queue. |
 | `!repeat <n> <query>`  | Plays a song in loop for n times. Supports YouTube, Spotify, and SoundCloud URLs (use `!skip all` to stop the loop). |
 | `!skip`                | Skips the current track and plays the next one in the queue.                                                        |
-| `!skip all`            | Skips the current track and the loop; then it plays the next track in queue.     |
+| `!skip all`            | Skips the current track and all remaining tracks from the same playlist/album or loop, then plays the next track in queue. |
 | `!pause`               | Pauses the currently playing track.                                                                                  |
 | `!resume`              | Resumes the paused track.                                                                                           |
 | `!track`               | Shows the currently playing track.                                                                                   |
