@@ -451,53 +451,37 @@ def after_playing(error, guild_id):
 
 # Function to play song track in voice channel
 async def play_audio(ctx, stream_url, title, video_url):
-    vc = ctx.voice_client
-    if vc is None:
-        channel = ctx.author.voice.channel
-        vc = await channel.connect()
+    try:
+        vc = ctx.voice_client
+        if vc is None:
+            channel = ctx.author.voice.channel
+            vc = await channel.connect()
 
-    # Enhanced options for SoundCloud HLS support
-    before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-    ffmpeg_options = "-vn"
-    
-    # For SoundCloud files (now local files), use simple options
-    is_temp_file = stream_url.startswith('/dev/shm/') or stream_url.startswith('/tmp/')
-    if 'sndcdn.com' in video_url or is_temp_file:
-        # Simple options for local files
-        before_options = ""
+        # Enhanced options for SoundCloud HLS support
+        before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
         ffmpeg_options = "-vn"
-    
-    source = FFmpegPCMAudio(source=stream_url, before_options=before_options, options=ffmpeg_options)
-    vc.play(source, after=lambda e: after_playing(e, ctx.guild.id))
-    await ctx.send(f"I'm playing: **{title}**\n{video_url}")
+        
+        # For SoundCloud files (now local files), use simple options
+        is_temp_file = stream_url.startswith('/dev/shm/') or stream_url.startswith('/tmp/')
+        if 'sndcdn.com' in video_url or is_temp_file:
+            # Simple options for local files
+            before_options = ""
+            ffmpeg_options = "-vn"
+        
+        vc.play(FFmpegPCMAudio(source=stream_url, before_options=before_options, options=ffmpeg_options), after=lambda e: after_playing(e, ctx.guild.id))
+        await ctx.send(f"I'm playing: **{title}**\n{video_url}")
 
-    # Add to history
-    server_info = get_server_info(ctx.guild.id)
-    server_info['playback_history'].append({'title': title, 'video_url': video_url})
+        # Add to history
+        server_info = get_server_info(ctx.guild.id)
+        server_info['playback_history'].append({'title': title, 'video_url': video_url})
 
-    # Set current track with temp file info for cleanup
-    # Note: collection_id is not passed here but maintained from next_track callback
-    track_info = {'title': title, 'video_url': video_url}
-    if is_temp_file:
-        track_info['temp_file'] = stream_url
-    server_info['current_track'] = track_info
-
-# Command to display current audio track
-@bot.command(help = "Shows current audio track.")
-async def track(ctx):
-    server_info = get_server_info(ctx.guild.id)
-    if server_info['current_track']:
-        await ctx.send(f"Current track: **{server_info['current_track']['title']}**\n{server_info['current_track']['video_url']}")
-    else:
-        await ctx.send("No track is currently playing.")
-
-# Command to display custom help message
-@bot.command(name='djhelp', help = "Lists all commands for PakoDJ.")
-async def custom_help(ctx):
-    help_message = """
-**PakoDJ Bot Commands:**
-- `!join` - Joins user's voice channel
-- `!play` - Plays an audio track searched by keywords, YouTube link, Spotify URL (track/album/playlist), or SoundCloud URL (if a song is currently playing, adds the searched song in a queue).
+        # Set current track with temp file info for cleanup
+        # Note: collection_id is not passed here but maintained from next_track callback
+        track_info = {'title': title, 'video_url': video_url}
+        if is_temp_file:
+            track_info['temp_file'] = stream_url
+        server_info['current_track'] = track_info
+    except Exception as e:
 - `!repeat` - Plays a song in loop for n times. Supports YouTube, Spotify, and SoundCloud URLs (use `!skip all` to stop the loop).
 - `!skip` - Stops current audio track and plays the next one in the queue.
 - `!skip all` - Skips the current track and the loop; then it plays the next track in queue.
@@ -514,21 +498,16 @@ async def custom_help(ctx):
 @bot.command(help = "Joins user's voice channel.")
 async def join(ctx):
     try:
-        if ctx.author.voice:
+        if ctx.voice_client and ctx.voice_client.is_connected():
+            await ctx.send("Already in a voice channel.")
+        elif ctx.author.voice:
             channel = ctx.author.voice.channel
             await channel.connect()
             await ctx.send(f"Joined {channel}")
         else:
             await ctx.send("You need to be in a voice channel to use this command.")
-    except discord.ClientException as e:
-        await ctx.send(f"Error: {e}")
-        print(f"ClientException: {e}")
-    except discord.InvalidArgument as e:
-        await ctx.send(f"Error: {e}")
-        print(f"InvalidArgument: {e}")
     except Exception as e:
-        await ctx.send(f"An unexpected error occurred: {e}")
-        print(f"Unexpected error: {e}")
+        print(f"Error in join: {e}")
 
 # Command to reproduce audio
 @bot.command(help = "Plays an audio track searched by keywords, YouTube link, Spotify URL, or SoundCloud URL. Supports full Spotify playlists and albums (if a song is currently playing, adds the searched song in a queue).")
@@ -762,14 +741,13 @@ async def stop(ctx):
         server_info = get_server_info(ctx.guild.id)
         server_info['audio_queue'].clear()
         server_info['current_track'] = None
-        if ctx.voice_client is not None:
+        if ctx.voice_client and ctx.voice_client.is_connected():
             await ctx.voice_client.disconnect()
             await ctx.send("Track stopped and bot disconnected.")
         else:
             await ctx.send("Bot is not in a voice channel.")
     except Exception as e:
-        await ctx.send(f"Error: {e}")
-        print(f"Error: {e}")
+        print(f"Error in stop: {e}")
 
 # Event to log bot's successful connection on console
 @bot.event
