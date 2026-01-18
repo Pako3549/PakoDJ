@@ -68,7 +68,7 @@ def get_audio_stream_url(url):
         ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True,
-            'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
+            'extractor_args': {'youtube': {'innertube_client': ['web', 'tv']}},
         }
         
         # Special handling for SoundCloud - use RAM disk to avoid SD card wear
@@ -120,7 +120,7 @@ def search_youtube(query):
             'quiet': True,
             'default_search': 'ytsearch',
             'max_downloads': 1,
-            'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
+            'extractor_args': {'youtube': {'innertube_client': ['web', 'tv']}},
         }
         if os.path.isfile('youtube_cookies.txt'):
             ydl_opts['cookiefile'] = 'youtube_cookies.txt'
