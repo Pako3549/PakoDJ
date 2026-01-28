@@ -490,18 +490,17 @@ async def play_audio(ctx, stream_url, title, video_url):
 @bot.command(help="Shows available commands.")
 async def help(ctx):
     help_message = """
-**Commands:**
-- `!join` - Joins user's voice channel.
-- `!play <query/url>` - Plays an audio track searched by keywords, YouTube link, Spotify URL, or SoundCloud URL (playlists/albums supported).
-- `!repeat` - Plays a song in loop for n times. Supports YouTube, Spotify, and SoundCloud URLs (use `!skip all` to stop the loop).
-- `!skip` - Stops current audio track and plays the next one in the queue.
-- `!skip all` - Skips the current track and the loop; then it plays the next track in queue.
-- `!pause` - Pauses currently playing audio track.
-- `!resume` - Resumes paused audio track.
-- `!track` - Shows current audio track.
-- `!queue` - Shows queued audio tracks.
-- `!history` - Shows previously played audio tracks.
-- `!stop` - Stops playback and disconnects bot from voice channel.
+!join - Joins user's voice channel.
+!play <query/url> - Plays an audio track searched by keywords, YouTube link, Spotify URL, or SoundCloud URL (playlists/albums supported).
+!repeat - Plays a song in loop for n times. Supports YouTube, Spotify, and SoundCloud URLs (use !skip all to stop the loop).
+!skip - Stops current audio track and plays the next one in the queue.
+!skip all - Skips the current track and the loop; then it plays the next track in queue.
+!pause - Pauses currently playing audio track.
+!resume - Resumes paused audio track.
+!track - Shows current audio track.
+!queue - Shows queued audio tracks.
+!history - Shows previously played audio tracks.
+!stop - Stops playback and disconnects bot from voice channel.
     """
     await ctx.send(help_message)
 
@@ -517,24 +516,6 @@ async def track(ctx):
     else:
         await ctx.send("No track is currently playing.")
 
-# Command to display custom help message
-@bot.command(name='djhelp', help="Lists all commands for PakoDJ.")
-async def custom_help(ctx):
-    help_message = """
-**PakoDJ Bot Commands:**
-- `!join` - Joins user's voice channel
-- `!play` - Plays an audio track searched by keywords, YouTube link, Spotify URL (track/album/playlist), or SoundCloud URL (if a song is currently playing, adds the searched song in a queue).
-- `!repeat` - Plays a song in loop for n times. Supports YouTube, Spotify, and SoundCloud URLs (use `!skip all` to stop the loop).
-- `!skip` - Stops current audio track and plays the next one in the queue.
-- `!skip all` - Skips the current track and the loop; then it plays the next track in queue.
-- `!pause` - Pauses currently playing audio track.
-- `!resume` - Resumes paused audio track.
-- `!track` - Shows current audio track.
-- `!queue` - Shows queued audio tracks.
-- `!history` - Shows previously played audio tracks.
-- `!stop` - Stops playback and disconnects bot from voice channel.
-    """
-    await ctx.send(help_message)
 
 # Command to join the user's voice channel
 @bot.command(help = "Joins user's voice channel.")
