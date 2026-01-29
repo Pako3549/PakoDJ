@@ -10,10 +10,32 @@ import random
 from discord import FFmpegPCMAudio
 from dotenv import load_dotenv
 import spotipy
+import shutil
 from spotipy.oauth2 import SpotifyClientCredentials
 
 # Load environmental variables
 load_dotenv()
+
+# Log JS runtime availability for yt-dlp
+deno_path = shutil.which("deno")
+print(f"Deno runtime: {deno_path if deno_path else 'NOT FOUND'}")
+
+# Extract headers from yt-dlp info entries (best-effort)
+def _extract_http_headers(info):
+    if not info:
+        return None
+    if isinstance(info, dict):
+        headers = info.get('http_headers')
+        if headers:
+            return headers
+        # Sometimes headers live on requested_formats or formats entries
+        for key in ('requested_formats', 'formats'):
+            formats = info.get(key) or []
+            if formats:
+                fmt_headers = formats[0].get('http_headers')
+                if fmt_headers:
+                    return fmt_headers
+    return None
 
 # Initialize Spotify client (optional)
 spotify_client = None
@@ -36,6 +58,15 @@ intents.messages = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Prefer Android client to avoid cookie prompts (may 403 for some videos)
+YDL_BASE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.youtube.com/",
+}
+YDL_CLIENTS = {"player_client": ["android"], "innertube_client": ["android"]}
+YDL_FORMAT = "bestaudio/best"
 bot.remove_command("help")
 
 # Dictionaries to store playback information for each server
@@ -67,9 +98,11 @@ def get_audio_stream_url(url):
     try:
         url = re.sub(r'&.*', '', url)
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': YDL_FORMAT,
             'quiet': True,
-            'extractor_args': {'youtube': {'innertube_client': ['web', 'tv']}},
+            'extractor_args': {'youtube': YDL_CLIENTS},
+            'http_headers': YDL_BASE_HEADERS,
+            'js_runtimes': {'deno': {'path': '/usr/local/bin/deno'}},
         }
         
         # Special handling for SoundCloud - use RAM disk to avoid SD card wear
@@ -96,7 +129,7 @@ def get_audio_stream_url(url):
                 import glob
                 downloaded_file = glob.glob(f"{ram_dir}/{info['title']}.*")
                 if downloaded_file:
-                    return downloaded_file[0], info['title'], info['webpage_url']
+                    return downloaded_file[0], info['title'], info['webpage_url'], None
                 else:
                     raise ValueError("Downloaded file not found")
         else:
@@ -107,21 +140,24 @@ def get_audio_stream_url(url):
                 info = ydl.extract_info(url, download=False)
                 if info is None:
                     raise ValueError("No information retrieved from URL")
-                return info['url'], info['title'], info['webpage_url']
+                headers = _extract_http_headers(info)
+                return info['url'], info['title'], info['webpage_url'], headers
                 
     except Exception as e:
         print(f"Error retrieving audio stream: {e}")
-        return None, None, None
+        return None, None, None, None
 
 # Search on youtube using a query written by the user
 def search_youtube(query):
     try:
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': YDL_FORMAT,
             'quiet': True,
             'default_search': 'ytsearch',
             'max_downloads': 1,
-            'extractor_args': {'youtube': {'innertube_client': ['web', 'tv']}},
+            'extractor_args': {'youtube': YDL_CLIENTS},
+            'http_headers': YDL_BASE_HEADERS,
+            'js_runtimes': {'deno': {'path': '/usr/local/bin/deno'}},
         }
         if os.path.isfile('youtube_cookies.txt'):
             ydl_opts['cookiefile'] = 'youtube_cookies.txt'
@@ -131,10 +167,11 @@ def search_youtube(query):
             if info and 'entries' in info and info['entries']:
                 entry = info['entries'][0]
                 print(f"Found YouTube video: {entry['title']}")
-                return entry['url'], entry['title'], entry['webpage_url']
+                headers = _extract_http_headers(entry)
+                return entry['url'], entry['title'], entry['webpage_url'], headers
             else:
                 print(f"No results found for query: '{query}'")
-                return None, None, None
+                return None, None, None, None
     except Exception as e:
         error_msg = str(e).lower()
         # Check for blocking errors
@@ -144,7 +181,7 @@ def search_youtube(query):
             raise BlockingError(f"Authentication or challenge required: {e}")
         else:
             print(f"Error searching on YouTube for '{query}': {e}")
-        return None, None, None
+        return None, None, None, None
 
 # Custom exception for blocking errors
 class BlockingError(Exception):
@@ -160,7 +197,7 @@ def search_youtube_with_fallback(original_query):
     except BlockingError:
         # Blocking error, don't try fallbacks
         print(f"Skipping fallback attempts for '{original_query}' due to blocking error")
-        return None, None, None
+        return None, None, None, None
     
     # Generate alternative queries with random variations
     fallback_queries = []
@@ -192,10 +229,10 @@ def search_youtube_with_fallback(original_query):
         except BlockingError:
             # Stop all fallback attempts on blocking error
             print(f"Blocking error encountered, stopping all fallback attempts")
-            return None, None, None
+            return None, None, None, None
     
     print(f"All search attempts failed for: '{original_query}'")
-    return None, None, None
+    return None, None, None, None
 
 # Function to check if URL is a Spotify URL
 def is_spotify_url(url):
@@ -273,7 +310,7 @@ def get_spotify_tracks_list(url):
 def get_spotify_track_info(url):
     if not spotify_client:
         print("Spotify client not initialized - check SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables")
-        return None, None, None
+        return None, None, None, None
     
     try:
         print(f"Processing Spotify URL: {url}")
@@ -294,13 +331,13 @@ def get_spotify_track_info(url):
             return search_youtube_with_fallback(search_query)
         else:
             print(f"Unsupported Spotify URL type (use get_spotify_tracks_list for playlists/albums): {url}")
-            return None, None, None
+            return None, None, None, None
                     
     except Exception as e:
         print(f"Error processing Spotify URL '{url}': {e}")
         import traceback
         print(f"Full traceback: {traceback.format_exc()}")
-        return None, None, None
+        return None, None, None, None
 
 # Async function to load playlist tracks in background
 async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collection_type, collection_id, status_msg):
@@ -316,7 +353,7 @@ async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collecti
         try:
             # Run sync search in thread to avoid blocking
             loop = asyncio.get_event_loop()
-            stream_url, title, video_url = await loop.run_in_executor(None, search_youtube_with_fallback, search_query)
+            stream_url, title, video_url, headers = await loop.run_in_executor(None, search_youtube_with_fallback, search_query)
             
             if stream_url is None:
                 print(f"Failed to find track: {search_query}")
@@ -335,13 +372,14 @@ async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collecti
                     'url': stream_url,
                     'title': title,
                     'video_url': video_url,
+                    'headers': headers,
                     'track_number': track_counter,
                     'collection_id': collection_id  # Add collection ID for skip all
                 }
                 
                 # If it's the first track and nothing is playing, start immediately
                 if not first_track_played and (not ctx.voice_client or not ctx.voice_client.is_playing()):
-                    await play_audio(ctx, stream_url, title, video_url)
+                    await play_audio(ctx, stream_url, title, video_url, headers=headers)
                     first_track_played = True
                     tracks_loaded += 1
                 else:
@@ -439,7 +477,13 @@ def after_playing(error, guild_id):
                     next_track = group.pop(0)
                     if not group:
                         server_info['audio_queue'].pop(0)
-                    await play_audio(next_track['ctx'], next_track['url'], next_track['title'], next_track['video_url'])
+                    await play_audio(
+                        next_track['ctx'],
+                        next_track['url'],
+                        next_track['title'],
+                        next_track['video_url'],
+                        headers=next_track.get('headers')
+                    )
                     # Preserve collection_id in current_track
                     if 'collection_id' in next_track:
                         server_info['current_track']['collection_id'] = next_track['collection_id']
@@ -451,7 +495,7 @@ def after_playing(error, guild_id):
     asyncio.run_coroutine_threadsafe(next_track(), bot.loop)
 
 # Function to play song track in voice channel
-async def play_audio(ctx, stream_url, title, video_url):
+async def play_audio(ctx, stream_url, title, video_url, headers=None):
     try:
         vc = ctx.voice_client
         if vc is None:
@@ -468,6 +512,23 @@ async def play_audio(ctx, stream_url, title, video_url):
             # Simple options for local files
             before_options = ""
             ffmpeg_options = "-vn"
+        elif headers:
+            # Prefer minimal headers to avoid 403s from googlevideo
+            user_agent = headers.get('User-Agent') or headers.get('user-agent')
+            referer = headers.get('Referer') or headers.get('referer') or video_url
+            origin = headers.get('Origin') or headers.get('origin') or "https://www.youtube.com"
+            header_lines = []
+            if referer:
+                header_lines.append(f"Referer: {referer}")
+            if origin:
+                header_lines.append(f"Origin: {origin}")
+            if header_lines:
+                headers_str = "\r\n".join(header_lines) + "\r\n"
+                headers_str = headers_str.replace('"', '\\"')
+                before_options = f'-headers "{headers_str}" {before_options}'
+            if user_agent:
+                safe_ua = user_agent.replace('"', '\\"')
+                before_options = f'-user_agent "{safe_ua}" {before_options}'
         
         vc.play(FFmpegPCMAudio(source=stream_url, before_options=before_options, options=ffmpeg_options), after=lambda e: after_playing(e, ctx.guild.id))
         await ctx.send(f"I'm playing: **{title}**\n{video_url}")
@@ -481,6 +542,8 @@ async def play_audio(ctx, stream_url, title, video_url):
         track_info = {'title': title, 'video_url': video_url}
         if is_temp_file:
             track_info['temp_file'] = stream_url
+        if headers:
+            track_info['headers'] = headers
         server_info['current_track'] = track_info
     except Exception as e:
         await ctx.send(f"Error: {e}")
@@ -574,7 +637,7 @@ async def play(ctx, *, query: str):
             if is_spotify_url(query):
                 search_msg = await ctx.send("Searching Spotify track on YouTube...")
             
-            stream_url, title, video_url = get_enhanced_audio_info(query)
+            stream_url, title, video_url, headers = get_enhanced_audio_info(query)
 
             if stream_url is None:
                 error_msg = "Unable to retrieve audio stream."
@@ -605,12 +668,19 @@ async def play(ctx, *, query: str):
             lock = get_server_lock(ctx.guild.id)
             async with lock:
                 track_counter += 1
-                track = {'ctx': ctx, 'url': stream_url, 'title': title, 'video_url': video_url, 'track_number': track_counter}
+                track = {
+                    'ctx': ctx,
+                    'url': stream_url,
+                    'title': title,
+                    'video_url': video_url,
+                    'headers': headers,
+                    'track_number': track_counter
+                }
                 if ctx.voice_client and ctx.voice_client.is_playing():
                     server_info['audio_queue'].append([track]) 
                     await ctx.send(f"Track added to queue: **{title}**\n{video_url}")
                 else:
-                    await play_audio(ctx, stream_url, title, video_url)
+                    await play_audio(ctx, stream_url, title, video_url, headers=headers)
         else:
             await ctx.send("You have to be in a voice channel to use this command!")
     except Exception as e:
@@ -627,7 +697,7 @@ async def repeat(ctx, n: int, *, query: str):
                 await ctx.send("Please choose a number greater than 0.")
                 return
 
-            stream_url, title, video_url = get_enhanced_audio_info(query)
+            stream_url, title, video_url, headers = get_enhanced_audio_info(query)
 
             if stream_url is None:
                 await ctx.send("Unable to retrieve audio stream.")
@@ -644,6 +714,7 @@ async def repeat(ctx, n: int, *, query: str):
                         'url': stream_url,
                         'title': f"{title} (loop {i+1}/{n})",
                         'video_url': video_url,
+                        'headers': headers,
                         'track_number': track_counter
                     })
                 if ctx.voice_client and ctx.voice_client.is_playing():
@@ -652,7 +723,7 @@ async def repeat(ctx, n: int, *, query: str):
                 else:
                     # Play the first in the group, queue the rest as a group
                     first, rest = repeat_group[0], repeat_group[1:]
-                    await play_audio(first['ctx'], first['url'], first['title'], first['video_url'])
+                    await play_audio(first['ctx'], first['url'], first['title'], first['video_url'], headers=first.get('headers'))
                     if rest:
                         server_info['audio_queue'].insert(0, rest)  # Play the rest as a group next
         else:
