@@ -22,6 +22,7 @@ RUN set -eux; \
     case "$arch" in \
       x86_64) deno_arch="x86_64-unknown-linux-gnu" ;; \
       aarch64|arm64) deno_arch="aarch64-unknown-linux-gnu" ;; \
+      armv7l|armhf) deno_arch="armv7-unknown-linux-gnueabihf" ;; \
       *) echo "Unsupported arch: $arch"; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/denoland/deno/releases/latest/download/deno-${deno_arch}.zip" -o /tmp/deno.zip; \
