@@ -1,5 +1,6 @@
-﻿discord.py
+discord.py[voice]
 PyNaCl
+davey
 yt-dlp[default] @ git+https://github.com/yt-dlp/yt-dlp@master
 python-dotenv
 spotipy
