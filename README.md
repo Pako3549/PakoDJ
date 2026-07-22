@@ -58,7 +58,7 @@
 #### Alternative: Build Locally (Slower)
 If you prefer to build the image yourself:
 ```bash
-docker-compose -f docker-compose.build.yml up -d
+docker-compose -f compose.build.yml up -d
 ```
 
 ### 🐍 Manual Python Setup
@@ -90,9 +90,9 @@ docker-compose -f docker-compose.build.yml up -d
 - **Update image**: `docker-compose pull && docker-compose up -d`
 
 #### For Local Build (Alternative):
-- **View logs**: `docker-compose -f docker-compose.build.yml logs -f pakodj`
-- **Stop the bot**: `docker-compose -f docker-compose.build.yml down`
-- **Restart and rebuild**: `docker-compose -f docker-compose.build.yml up -d --build`
+- **View logs**: `docker-compose -f compose.build.yml logs -f pakodj`
+- **Stop the bot**: `docker-compose -f compose.build.yml down`
+- **Restart and rebuild**: `docker-compose -f compose.build.yml up -d --build`
 
 ## ⚠️ Age-Restricted (+18) YouTube Videos
 

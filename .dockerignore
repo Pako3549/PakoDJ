@@ -4,7 +4,8 @@
 
 # Ignore Docker files
 Dockerfile
-docker-compose.yml
+compose.yml
+compose.build.yml
 .dockerignore
 
 # Ignore environment files (these should be mounted or passed as env vars)
