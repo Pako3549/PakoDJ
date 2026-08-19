@@ -61,6 +61,17 @@ If you prefer to build the image yourself:
 docker-compose -f deploy/compose.build.yml up -d
 ```
 
+#### 🧪 Development
+For local development with live code reload (your `bot/` folder is mounted into the container):
+```bash
+docker compose up -d --build
+docker compose logs -f pakodj-dev
+```
+The image is always built from the local `Dockerfile` (so `requirements.txt`/Dockerfile changes are picked up); the `./bot` mount lets you tweak Python code without rebuilding. To just rebuild the image without recreating:
+```bash
+docker compose build
+```
+
 ### 🐍 Manual Python Setup
 1. **Clone the repository**:
     ```bash

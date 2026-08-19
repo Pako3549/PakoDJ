@@ -1,0 +1,11 @@
+services:
+  pakodj-dev:
+    build: .
+    container_name: pakodj-dev
+    restart: "no"
+    env_file:
+      - bot/.env
+    volumes:
+      - ./bot:/app
+      - ./logs:/app/logs
+      - ./bot/youtube_cookies.txt:/app/youtube_cookies.txt
