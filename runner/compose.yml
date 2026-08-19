@@ -1,0 +1,27 @@
+name: pakodj-runner
+
+services:
+  gha_runner:
+    image: myoung34/github-runner:latest
+    container_name: pakodj-gha-runner
+    restart: unless-stopped
+    environment:
+      - RUNNER_SCOPE=repo
+      - REPO_URL=https://github.com/Pako3549/PakoDJ
+      - ACCESS_TOKEN=${ACCESS_TOKEN}
+      - RUNNER_NAME=${RUNNER_NAME:-pakodj-runner}
+      - RUNNER_WORKDIR=/tmp/github-runner
+      - LABELS=${RUNNER_LABELS:-self-hosted}
+      - CONFIGURED_ACTIONS_RUNNER_FILES_DIR=/runner/data
+      - DISABLE_AUTO_UPDATE=true
+      - DISABLE_AUTOMATIC_DEREGISTRATION=true
+    volumes:
+      - runner-data:/runner/data
+      - workdir:/tmp/github-runner
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  runner-data:
+    name: pakodj-runner-data
+  workdir:
+    name: pakodj-runner-workdir

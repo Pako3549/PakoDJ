@@ -4,9 +4,11 @@
 
 # Ignore Docker files
 Dockerfile
-compose.yml
-compose.build.yml
 .dockerignore
+
+# Ignore compose and runner configs (not needed in the image)
+deploy/
+runner/
 
 # Ignore environment files (these should be mounted or passed as env vars)
 .env

@@ -54,3 +54,30 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: self-hosted
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Prepare config files
+      run: |
+        mkdir -p bot logs
+        cat > bot/.env <<EOF
+        token=${{ secrets.DISCORD_TOKEN }}
+        EOF
+        if [ -n "${{ secrets.SPOTIFY_CLIENT_ID }}" ]; then
+          echo "SPOTIFY_CLIENT_ID=${{ secrets.SPOTIFY_CLIENT_ID }}" >> bot/.env
+          echo "SPOTIFY_CLIENT_SECRET=${{ secrets.SPOTIFY_CLIENT_SECRET }}" >> bot/.env
+        fi
+
+    - name: Pull and start container
+      run: |
+        docker compose -f deploy/compose.yml pull pakodj
+        docker compose -f deploy/compose.yml up -d --remove-orphans

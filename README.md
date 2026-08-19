@@ -52,13 +52,13 @@
     ```
 3. **Run the bot**:
     ```bash
-    docker-compose up -d
+    docker-compose -f deploy/compose.yml up -d
     ```
 
 #### Alternative: Build Locally (Slower)
 If you prefer to build the image yourself:
 ```bash
-docker-compose -f compose.build.yml up -d
+docker-compose -f deploy/compose.build.yml up -d
 ```
 
 ### 🐍 Manual Python Setup
@@ -84,15 +84,60 @@ docker-compose -f compose.build.yml up -d
     ```
 
 ### 🐳 Docker Management Commands
-- **View logs**: `docker-compose logs -f pakodj`
-- **Stop the bot**: `docker-compose down`
-- **Restart the bot**: `docker-compose restart pakodj`
-- **Update image**: `docker-compose pull && docker-compose up -d`
+- **View logs**: `docker-compose -f deploy/compose.yml logs -f pakodj`
+- **Stop the bot**: `docker-compose -f deploy/compose.yml down`
+- **Restart the bot**: `docker-compose -f deploy/compose.yml restart pakodj`
+- **Update image**: `docker-compose -f deploy/compose.yml pull && docker-compose -f deploy/compose.yml up -d`
 
 #### For Local Build (Alternative):
-- **View logs**: `docker-compose -f compose.build.yml logs -f pakodj`
-- **Stop the bot**: `docker-compose -f compose.build.yml down`
-- **Restart and rebuild**: `docker-compose -f compose.build.yml up -d --build`
+- **View logs**: `docker-compose -f deploy/compose.build.yml logs -f pakodj`
+- **Stop the bot**: `docker-compose -f deploy/compose.build.yml down`
+- **Restart and rebuild**: `docker-compose -f deploy/compose.build.yml up -d --build`
+
+## 🚀 Auto-Deploy with a Self-Hosted Runner
+
+On every push to `main`, the CI workflow (`.github/workflows/docker-publish.yml`) builds and pushes the PakoDJ image to GHCR (`ghcr.io/pako3549/pakodj:latest`). A second job (`deploy`) then runs on a machine of yours with a **self-hosted GitHub Actions runner**: the runner pulls the fresh image from GHCR and restarts the bot with `docker compose`.
+
+### 1. Set Up the Runner (once per machine)
+Create a `.env` file in the `runner/` directory with your GitHub token:
+
+```env
+ACCESS_TOKEN=github_pat_xxx   # classic PAT with "repo" scope (or fine-grained with Actions read/write)
+RUNNER_NAME=pakodj-runner
+RUNNER_LABELS=self-hosted
+```
+
+Start the runner:
+
+```bash
+docker compose -f runner/compose.yml up -d
+```
+
+The runner registers itself against the `Pako3549/PakoDJ` repository and automatically picks up deploy jobs tagged `self-hosted`.
+
+> ⚠️ The runner runs inside the docker socket, so it needs a machine with Docker installed. `runner/compose.yml` is the same tried-and-tested setup as `myoung34/github-runner`, which registers the runner each restart.
+
+### 2. Configure the Deployment
+The `deploy` job writes `bot/.env` on the runner from GitHub **repository secrets** (Settings → Secrets and variables → Actions):
+
+| Secret | Required | Description |
+| ------ | -------- | ----------- |
+| `DISCORD_TOKEN` | Yes | Bot token used at runtime |
+| `SPOTIFY_CLIENT_ID` | No | Spotify Integration |
+| `SPOTIFY_CLIENT_SECRET` | No | Spotify Integration |
+
+For persistent log permissions on the host, run once:
+
+```bash
+sudo chown -R 1000:1000 logs
+```
+
+### 3. Runner Management
+- **View runner logs**: `docker compose -f runner/compose.yml logs -f`
+- **Stop the runner**: `docker compose -f runner/compose.yml down`
+- **Restart the runner**: `docker compose -f runner/compose.yml restart`
+
+After a successful push to `main`, check that the `deploy` job ran on your runner and that `pakodj` was restarted with the new image.
 
 ## ⚠️ Age-Restricted (+18) YouTube Videos
 
