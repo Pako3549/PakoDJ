@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Theme tokens from docs/style.md; light = default, dark via .dark on <html>. */
+:root {
+  --color-surface: #f3f4f6;
+  --color-card: #ffffff;
+  --color-border: #d1d5db;
+  --color-text-primary: #111827;
+  --color-text-secondary: #4b5563;
+  --color-text-muted: #9ca3af;
+  --color-text-inverse: #ffffff;
+  --color-msg-in: #e8f5e9;
+  --color-msg-out: #e3f2fd;
+  --scrollbar-thumb: #d1d5db;
+}
+
+.dark {
+  --color-surface: #111318;
+  --color-card: #1a1d23;
+  --color-border: #2a2d35;
+  --color-text-primary: #f3f4f6;
+  --color-text-secondary: #9ca3af;
+  --color-text-muted: #6b7280;
+  --color-text-inverse: #000000;
+  --color-msg-in: #1a2e1a;
+  --color-msg-out: #1a2744;
+  --scrollbar-thumb: #2a2d35;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+body {
+  transition: background-color 0.3s, color 0.3s;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.pulse { animation: pulse 2s infinite; }

@@ -14,7 +14,8 @@ services:
       # API_PUBLIC_ORIGIN: https://api.yourdomain.com
       # Discord IDs that get the admin flag (comma separated)
       # DISCORD_ADMIN_IDS: 123456789012345678
-      # Optional: browser origins allowed to call the API (comma separated)
+      # Optional: browser origins allowed to call the API (comma separated).
+      # Not needed when the webapp is served behind the local nginx (same origin).
       # API_CORS_ORIGINS: https://your-webapp.example
     depends_on:
       db:
@@ -22,6 +23,34 @@ services:
     volumes:
       - ./bot:/app
       - ./logs:/app/logs
+
+  # Webapp (Next.js + TypeScript + React): dev with hot reload on source mounts.
+  web:
+    build: ./web
+    container_name: pakodj-web-dev
+    restart: "no"
+    depends_on:
+      - pakodj-dev
+    volumes:
+      - ./web:/app
+      - web-node-modules:/app/node_modules
+
+  # Webserver in front of everything; the ONLY port published (dev only).
+  # Open the whole frontend on: http://localhost:8080
+  nginx:
+    image: nginx:stable-alpine
+    container_name: pakodj-nginx-dev
+    restart: "no"
+    depends_on:
+      - web
+      - pakodj-dev
+    volumes:
+      - ./nginx/dev.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      # Development exposure, as requested: nginx is the single entry point
+      # (web UI, /_next, and the /api proxy). Production publishes nothing
+      # and sits behind Cloudflare Tunnel instead.
+      - "8080:80"
 
   db:
     image: postgres:17-alpine
@@ -39,17 +68,6 @@ services:
       timeout: 5s
       retries: 10
 
-  # Optional (dev): same as deploy — expose http://pakodj-dev:8000 via tunnel
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: pakodj-tunnel
-    restart: unless-stopped
-    profiles: ["tunnel"]
-    environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
-    command: tunnel --no-autoupdate run
-    depends_on:
-      - pakodj-dev
-
 volumes:
   pakodj-pgdata:
+  web-node-modules:
