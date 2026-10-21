@@ -5,7 +5,30 @@ services:
     restart: "no"
     env_file:
       - bot/.env
+    environment:
+      DATABASE_URL: postgres://pakodj:pakodj@db:5432/pakodj
+    depends_on:
+      db:
+        condition: service_healthy
     volumes:
       - ./bot:/app
       - ./logs:/app/logs
-      - ./bot/youtube_cookies.txt:/app/youtube_cookies.txt
+
+  db:
+    image: postgres:17-alpine
+    container_name: pakodj-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pakodj
+      POSTGRES_PASSWORD: pakodj
+      POSTGRES_DB: pakodj
+    volumes:
+      - pakodj-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pakodj -d pakodj"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pakodj-pgdata:

@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import spotipy
 import shutil
 from spotipy.oauth2 import SpotifyClientCredentials
+import db as database
 
 # Load environmental variables
 load_dotenv()
@@ -59,7 +60,7 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Prefer Android client to avoid cookie prompts (may 403 for some videos)
+# Prefer Android client (no external cookie file is used anymore)
 YDL_BASE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
@@ -69,21 +70,17 @@ YDL_CLIENTS = {"player_client": ["android"], "innertube_client": ["android"]}
 YDL_FORMAT = "bestaudio/best"
 bot.remove_command("help")
 
-# Dictionaries to store playback information for each server
+# Per-guild runtime state. Queues and history live in PostgreSQL (see db.py)
+# and survive restarts; only "live" playback data stays in memory.
 server_playback_info = {}
 server_locks = {}
-
-# Global track counter
-track_counter = 0
 
 # Function to get playback information for a server
 def get_server_info(guild_id):
     if guild_id not in server_playback_info:
         server_playback_info[guild_id] = {
             'current_track': None,
-            'audio_queue': [], 
-            'playback_history': [],
-            'loading_task': None  # Track background loading task
+            'loading_task': None  # Background playlist loading task
         }
     return server_playback_info[guild_id]
 
@@ -118,6 +115,7 @@ def get_audio_stream_url(url):
                 'extractaudio': True,
                 'audioformat': 'mp3',
                 'audioquality': '128K',  # Reduced quality to save RAM/storage
+                'concurrent_fragment_downloads': 4,  # Faster HLS download on the Pi
                 'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
             })
             
@@ -134,8 +132,6 @@ def get_audio_stream_url(url):
                     raise ValueError("Downloaded file not found")
         else:
             # Normal streaming for non-SoundCloud URLs
-            if os.path.isfile('youtube_cookies.txt'):
-                ydl_opts['cookiefile'] = 'youtube_cookies.txt'
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if info is None:
@@ -144,7 +140,7 @@ def get_audio_stream_url(url):
                 return info['url'], info['title'], info['webpage_url'], headers
                 
     except Exception as e:
-        print(f"Error retrieving audio stream: {e}")
+        print(f"Error retrieving audio stream for '{url}': {e}")
         return None, None, None, None
 
 # Search on youtube using a query written by the user
@@ -159,8 +155,6 @@ def search_youtube(query):
             'http_headers': YDL_BASE_HEADERS,
             'js_runtimes': {'deno': {'path': '/usr/local/bin/deno'}},
         }
-        if os.path.isfile('youtube_cookies.txt'):
-            ydl_opts['cookiefile'] = 'youtube_cookies.txt'
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             print(f"Searching YouTube for: '{query}'")
             info = ydl.extract_info(query, download=False)
@@ -175,7 +169,7 @@ def search_youtube(query):
     except Exception as e:
         error_msg = str(e).lower()
         # Check for blocking errors
-        if any(keyword in error_msg for keyword in ['sign in', 'authentication', 'challenge', 'cookies required', 'n challenge']):
+        if any(keyword in error_msg for keyword in ['sign in', 'authentication', 'challenge', 'n challenge']):
             print(f"Blocking error for '{query}': Skipping (authentication/challenge required)")
             # Raise special exception to stop fallback attempts
             raise BlockingError(f"Authentication or challenge required: {e}")
@@ -339,94 +333,6 @@ def get_spotify_track_info(url):
         print(f"Full traceback: {traceback.format_exc()}")
         return None, None, None, None
 
-# Async function to load playlist tracks in background
-async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collection_type, collection_id, status_msg):
-    global track_counter
-    server_info = get_server_info(ctx.guild.id)
-    lock = get_server_lock(ctx.guild.id)
-    
-    tracks_loaded = 0
-    failed_tracks = 0
-    first_track_played = False
-    
-    for i, search_query in enumerate(tracks_list):
-        try:
-            # Run sync search in thread to avoid blocking
-            loop = asyncio.get_event_loop()
-            stream_url, title, video_url, headers = await loop.run_in_executor(None, search_youtube_with_fallback, search_query)
-            
-            if stream_url is None:
-                print(f"Failed to find track: {search_query}")
-                failed_tracks += 1
-                # Update progress even for failed tracks
-                try:
-                    await status_msg.edit(content=f"Loading {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
-                except:
-                    pass
-                continue
-            
-            async with lock:
-                track_counter += 1
-                track = {
-                    'ctx': ctx,
-                    'url': stream_url,
-                    'title': title,
-                    'video_url': video_url,
-                    'headers': headers,
-                    'track_number': track_counter,
-                    'collection_id': collection_id  # Add collection ID for skip all
-                }
-                
-                # If it's the first track and nothing is playing, start immediately
-                if not first_track_played and (not ctx.voice_client or not ctx.voice_client.is_playing()):
-                    await play_audio(ctx, stream_url, title, video_url, headers=headers)
-                    first_track_played = True
-                    tracks_loaded += 1
-                else:
-                    # Add to queue
-                    server_info['audio_queue'].append([track])
-                    tracks_loaded += 1
-            
-            # Update progress message
-            try:
-                await status_msg.edit(content=f"Loading {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
-            except:
-                pass
-            
-            # Rate limiting to avoid YouTube throttling (increased delay)
-            await asyncio.sleep(0.5)
-            
-        except asyncio.CancelledError:
-            # Task was cancelled (skip all was called)
-            print(f"Playlist loading cancelled after {tracks_loaded} tracks")
-            try:
-                await status_msg.edit(content=f"Loading cancelled. Added {tracks_loaded} tracks from {collection_type} **{collection_name}**.")
-            except:
-                pass
-            return
-        except Exception as e:
-            # Log error but continue with next track
-            print(f"Unexpected error loading track '{search_query}': {e}")
-            failed_tracks += 1
-            # Update progress even on error
-            try:
-                await status_msg.edit(content=f"Loading {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
-            except:
-                pass
-            continue
-    
-    # Final status update
-    try:
-        result_msg = f"Added {tracks_loaded} tracks from {collection_type} **{collection_name}** to queue."
-        if failed_tracks > 0:
-            result_msg += f" ({failed_tracks} track(s) not found on YouTube)"
-        await status_msg.edit(content=result_msg)
-    except:
-        pass
-    
-    # Clear loading task reference when done
-    server_info['loading_task'] = None
-
 # Function to check if URL is a SoundCloud URL
 def is_soundcloud_url(url):
     soundcloud_patterns = [
@@ -451,12 +357,156 @@ def get_enhanced_audio_info(query):
         print("Detected search query - searching YouTube")
         return search_youtube_with_fallback(query)
 
+# ---------------------------------------------------------------------------
+# Non-blocking resolver + caches
+# ---------------------------------------------------------------------------
+# The bot can serve many servers at once: a yt-dlp search blocks for seconds,
+# so every resolution MUST run in the executor and must never be repeated for
+# queries already resolved recently (loop iterations, playlist reloads,
+# re-plays of the same song in different servers).
+SEARCH_CACHE_TTL = 6 * 3600   # search/query results stay valid for hours
+STREAM_CACHE_TTL = 10 * 60    # stream URLs expire after a few more hours
+
+search_cache = {}  # query -> (timestamp, title, webpage_url)
+stream_cache = {}  # webpage_url -> (timestamp, stream_url, http headers)
+
+def _cache_get(cache, key, ttl):
+    entry = cache.get(key)
+    if entry is not None:
+        if time.time() - entry[0] < ttl:
+            return entry
+        cache.pop(key, None)
+    return None
+
+def _cache_fit(cache):
+    if len(cache) > 1024:
+        cache.clear()
+
+# Resolve a query string (search text, YouTube/Spotify/SoundCloud URL) to a
+# playable stream, without ever blocking the event loop.
+async def resolve_audio_info_async(query):
+    if not query:
+        return None, None, None, None
+    loop = asyncio.get_event_loop()
+
+    title = None
+    video_url = None
+    hit = _cache_get(search_cache, query, SEARCH_CACHE_TTL)
+    if hit:
+        _, title, video_url = hit
+    else:
+        stream_url, title, video_url, headers = await loop.run_in_executor(
+            None, get_enhanced_audio_info, query
+        )
+        if stream_url is None or video_url is None:
+            return stream_url, title, video_url, headers
+        if stream_url.startswith('http'):
+            # Warm the stream cache too (works only for http streams; this
+            # skips SoundCloud temp files, which are deleted after playback)
+            stream_cache[video_url] = (time.time(), stream_url, headers)
+        _cache_fit(search_cache)
+        search_cache[query] = (time.time(), title, video_url)
+        return stream_url, title, video_url, headers
+
+    # Cached search hit: still need a playable stream URL
+    stream_hit = _cache_get(stream_cache, video_url, STREAM_CACHE_TTL)
+    if stream_hit:
+        _, stream_url, headers = stream_hit
+        return stream_url, title, video_url, headers
+
+    stream_url, title2, video_url2, headers = await loop.run_in_executor(
+        None, get_audio_stream_url, video_url
+    )
+    if stream_url and stream_url.startswith('http'):
+        _cache_fit(stream_cache)
+        stream_cache[video_url] = (time.time(), stream_url, headers)
+    return stream_url, title2 or title, video_url2 or video_url, headers
+
+# Edit a Discord message ignoring harmless failures (deleted, permissions, ...)
+async def safe_edit(msg, content):
+    try:
+        await msg.edit(content=content)
+    except Exception:
+        pass
+
+# Async function to load playlist tracks in background
+async def load_playlist_tracks_async(ctx, tracks_list, collection_name, collection_type, collection_id, status_msg):
+    server_info = get_server_info(ctx.guild.id)
+    lock = get_server_lock(ctx.guild.id)
+    
+    tracks_loaded = 0
+    failed_tracks = 0
+    first_track_played = False
+    
+    for i, search_query in enumerate(tracks_list):
+        try:
+            # Non-blocking resolution (executor + caches)
+            stream_url, title, video_url, headers = await resolve_audio_info_async(search_query)
+            
+            if stream_url is None:
+                print(f"Failed to find track: {search_query}")
+                failed_tracks += 1
+                # Update progress even for failed tracks
+                await safe_edit(status_msg, f"Loading {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
+                continue
+            
+            async with lock:
+                # If it's the first track and nothing is playing, start immediately
+                idle = not (ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()))
+                if not first_track_played and idle:
+                    await play_audio(ctx.guild, ctx.channel, stream_url, title, video_url,
+                                     headers=headers, collection_id=collection_id,
+                                     voice_channel=ctx.author.voice.channel)
+                    first_track_played = True
+                    tracks_loaded += 1
+                else:
+                    # Add to persistent queue
+                    await database.enqueue_track(
+                        guild_id=ctx.guild.id,
+                        title=title,
+                        webpage_url=video_url,
+                        search_query=search_query,
+                        collection_id=collection_id,
+                        collection_type=collection_type,
+                        requester_id=ctx.author.id,
+                        channel_id=ctx.channel.id
+                    )
+                    tracks_loaded += 1
+            
+            # Update progress message
+            await safe_edit(status_msg, f"Loading {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
+            
+            # Rate limiting to avoid YouTube throttling (increased delay)
+            await asyncio.sleep(0.5)
+            
+        except asyncio.CancelledError:
+            # Task was cancelled (skip all was called)
+            print(f"Playlist loading cancelled after {tracks_loaded} tracks")
+            await safe_edit(status_msg, f"Loading cancelled. Added {tracks_loaded} tracks from {collection_type} **{collection_name}**.")
+            return
+        except Exception as e:
+            # Log error but continue with next track
+            print(f"Unexpected error loading track '{search_query}': {e}")
+            failed_tracks += 1
+            # Update progress even on error
+            await safe_edit(status_msg, f"Loading {collection_type} **{collection_name}**: {i + 1}/{len(tracks_list)} tracks...")
+            continue
+    
+    # Final status update
+    result_msg = f"Added {tracks_loaded} tracks from {collection_type} **{collection_name}** to queue."
+    if failed_tracks > 0:
+        result_msg += f" ({failed_tracks} track(s) not found on YouTube)"
+    await safe_edit(status_msg, result_msg)
+    await database.complete_collection(collection_id, 'complete')
+    
+    # Clear loading task reference when done
+    server_info['loading_task'] = None
+
 # Callback function to manage audio reproduction errors
 def after_playing(error, guild_id):
     if error:
         print(f"Error during playback: {error}")
     server_info = get_server_info(guild_id)
-    lock = get_server_lock(guild_id)
     
     # Clean up SoundCloud temporary files
     current_track = server_info.get('current_track')
@@ -470,37 +520,81 @@ def after_playing(error, guild_id):
             print(f"Error cleaning up temporary file: {e}")
     
     async def next_track():
+        lock = get_server_lock(guild_id)
         async with lock:
-            while server_info['audio_queue']:
-                group = server_info['audio_queue'][0]
-                if group:
-                    next_track = group.pop(0)
-                    if not group:
-                        server_info['audio_queue'].pop(0)
-                    await play_audio(
-                        next_track['ctx'],
-                        next_track['url'],
-                        next_track['title'],
-                        next_track['video_url'],
-                        headers=next_track.get('headers')
-                    )
-                    # Preserve collection_id in current_track
-                    if 'collection_id' in next_track:
-                        server_info['current_track']['collection_id'] = next_track['collection_id']
+            while True:
+                row = await database.claim_next_track(guild_id)
+                if row is None:
+                    server_info['current_track'] = None
                     break
-                else:
-                    server_info['audio_queue'].pop(0)
-            if not server_info['audio_queue']:
-                server_info['current_track'] = None
+                played = await play_queued_row(guild_id, row)
+                if played:
+                    break
+                # Row failed to resolve: keep claiming until one plays or queue is empty
     asyncio.run_coroutine_threadsafe(next_track(), bot.loop)
 
-# Function to play song track in voice channel
-async def play_audio(ctx, stream_url, title, video_url, headers=None):
+# Pick a text channel to announce playback (falls back to the first available)
+def get_notify_channel(guild, channel_id):
+    if channel_id:
+        channel = bot.get_channel(channel_id)
+        if channel is not None and hasattr(channel, 'send'):
+            return channel
+    for text_channel in guild.text_channels:
+        return text_channel
+    return None
+
+# Resolve and play a queued row.
+# Stream URLs are re-resolved just-in-time because they expire after a few
+# hours, and it makes the persisted queue shippable across restarts.
+async def play_queued_row(guild_id, row, autopilot=True, voice_channel=None):
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return False
+    
+    if autopilot and (guild.voice_client is None or not guild.voice_client.is_connected()):
+        # Bot is no longer in voice: nobody can hear the queue, wipe it
+        await database.clear_queue(guild_id)
+        get_server_info(guild_id)['current_track'] = None
+        return True
+    
     try:
-        vc = ctx.voice_client
-        if vc is None:
-            channel = ctx.author.voice.channel
-            vc = await channel.connect()
+        # Prefer re-running the original search/query (keeps Spotify fallbacks
+        # and hits the resolution caches for loop iterations / re-plays)
+        stream_url, title, video_url, headers = await resolve_audio_info_async(
+            row['search_query'] or row['webpage_url']
+        )
+        # Fallback on the canonical webpage URL
+        if stream_url is None:
+            stream_url, title, video_url, headers = await resolve_audio_info_async(row['webpage_url'])
+    except Exception as e:
+        print(f"Error resolving queued track {row['id']}: {e}")
+        stream_url = None
+    
+    if stream_url is None:
+        channel = get_notify_channel(guild, row['channel_id'])
+        if channel:
+            try:
+                await channel.send(f"Couldn't load the next track **{row['title']}**, skipping it.")
+            except Exception:
+                pass
+        print(f"Queued track {row['id']} failed to resolve, skipping: {row['title']}")
+        return False
+    
+    notify_channel = get_notify_channel(guild, row['channel_id'])
+    return await play_audio(
+        guild, notify_channel, stream_url, title or row['title'],
+        video_url or row['webpage_url'], headers=headers,
+        collection_id=row['collection_id'], voice_channel=voice_channel
+    )
+
+# Function to play song track in voice channel
+async def play_audio(guild, notify_channel, stream_url, title, video_url, headers=None, collection_id=None, voice_channel=None):
+    try:
+        vc = guild.voice_client
+        if (vc is None or not vc.is_connected()):
+            if voice_channel is None:
+                raise RuntimeError("Bot is not in a voice channel")
+            vc = await voice_channel.connect()
 
         # Enhanced options for SoundCloud HLS support
         before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -530,24 +624,31 @@ async def play_audio(ctx, stream_url, title, video_url, headers=None):
                 safe_ua = user_agent.replace('"', '\\"')
                 before_options = f'-user_agent "{safe_ua}" {before_options}'
         
-        vc.play(FFmpegPCMAudio(source=stream_url, before_options=before_options, options=ffmpeg_options), after=lambda e: after_playing(e, ctx.guild.id))
-        await ctx.send(f"I'm playing: **{title}**\n{video_url}")
+        vc.play(FFmpegPCMAudio(source=stream_url, before_options=before_options, options=ffmpeg_options), after=lambda e: after_playing(e, guild.id))
+        if notify_channel:
+            await notify_channel.send(f"I'm playing: **{title}**\n{video_url}")
 
-        # Add to history
-        server_info = get_server_info(ctx.guild.id)
-        server_info['playback_history'].append({'title': title, 'video_url': video_url})
+        # Add to persistent history
+        await database.add_history(guild.id, title, video_url)
 
         # Set current track with temp file info for cleanup
-        # Note: collection_id is not passed here but maintained from next_track callback
         track_info = {'title': title, 'video_url': video_url}
         if is_temp_file:
             track_info['temp_file'] = stream_url
         if headers:
             track_info['headers'] = headers
-        server_info['current_track'] = track_info
+        if collection_id:
+            track_info['collection_id'] = collection_id
+        get_server_info(guild.id)['current_track'] = track_info
+        return True
     except Exception as e:
-        await ctx.send(f"Error: {e}")
+        if notify_channel:
+            try:
+                await notify_channel.send(f"Error: {e}")
+            except Exception:
+                pass
         print(f"Error during playback: {e}")
+        return False
 
 # Command to show help
 @bot.command(help="Shows available commands.")
@@ -598,12 +699,14 @@ async def join(ctx):
 # Command to reproduce audio
 @bot.command(help = "Plays an audio track searched by keywords, YouTube link, Spotify URL, or SoundCloud URL. Supports full Spotify playlists and albums (if a song is currently playing, adds the searched song in a queue).")
 async def play(ctx, *, query: str):
-    global track_counter
     try:
         if ctx.author.voice:
             # Check if it's a Spotify playlist or album
             if is_spotify_url(query) and ('playlist/' in query or 'album/' in query):
-                tracks_result = get_spotify_tracks_list(query)
+                # Extracting the track list hits the Spotify API: run it in
+                # the executor so other servers' commands are not frozen
+                loop = asyncio.get_event_loop()
+                tracks_result = await loop.run_in_executor(None, get_spotify_tracks_list, query)
                 
                 if tracks_result is None:
                     error_msg = "Unable to retrieve playlist/album."
@@ -618,8 +721,9 @@ async def play(ctx, *, query: str):
                     await ctx.send(f"No tracks found in {collection_type}: {collection_name}")
                     return
                 
-                # Generate unique collection ID for skip all functionality
+                # Unique collection id groups the whole playlist/album for !skip all
                 collection_id = str(uuid.uuid4())
+                await database.create_collection(collection_id, ctx.guild.id, collection_name, collection_type, len(tracks_list))
                 
                 # Create status message
                 status_msg = await ctx.send(f"Loading {collection_type} **{collection_name}**: 0/{len(tracks_list)} tracks...")
@@ -637,7 +741,9 @@ async def play(ctx, *, query: str):
             if is_spotify_url(query):
                 search_msg = await ctx.send("Searching Spotify track on YouTube...")
             
-            stream_url, title, video_url, headers = get_enhanced_audio_info(query)
+            # Non-blocking resolution so a slow search doesn't freeze the
+            # whole bot (other servers keep responding meanwhile)
+            stream_url, title, video_url, headers = await resolve_audio_info_async(query)
 
             if stream_url is None:
                 error_msg = "Unable to retrieve audio stream."
@@ -664,23 +770,23 @@ async def play(ctx, *, query: str):
                 except:
                     pass
 
-            server_info = get_server_info(ctx.guild.id)
-            lock = get_server_lock(ctx.guild.id)
-            async with lock:
-                track_counter += 1
-                track = {
-                    'ctx': ctx,
-                    'url': stream_url,
-                    'title': title,
-                    'video_url': video_url,
-                    'headers': headers,
-                    'track_number': track_counter
-                }
-                if ctx.voice_client and ctx.voice_client.is_playing():
-                    server_info['audio_queue'].append([track]) 
+            async with get_server_lock(ctx.guild.id):
+                # A paused player occupies the channel too: enqueue instead of
+                # silently replacing the paused track
+                occupied = ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused())
+                if occupied:
+                    await database.enqueue_track(
+                        guild_id=ctx.guild.id,
+                        title=title,
+                        webpage_url=video_url,
+                        search_query=query,
+                        requester_id=ctx.author.id,
+                        channel_id=ctx.channel.id
+                    )
                     await ctx.send(f"Track added to queue: **{title}**\n{video_url}")
                 else:
-                    await play_audio(ctx, stream_url, title, video_url, headers=headers)
+                    await play_audio(ctx.guild, ctx.channel, stream_url, title, video_url,
+                                     headers=headers, voice_channel=ctx.author.voice.channel)
         else:
             await ctx.send("You have to be in a voice channel to use this command!")
     except Exception as e:
@@ -690,42 +796,46 @@ async def play(ctx, *, query: str):
 # Command to play a track in loop
 @bot.command(help="Plays an audio track in loop for n times. Supports YouTube, Spotify, and SoundCloud URLs (use `!skip all` to stop).")
 async def repeat(ctx, n: int, *, query: str):
-    global track_counter
     try:
         if ctx.author.voice:
             if n < 1:
                 await ctx.send("Please choose a number greater than 0.")
                 return
 
-            stream_url, title, video_url, headers = get_enhanced_audio_info(query)
+            # Non-blocking resolution (executor + caches: the loop iterations
+            # re-use the query resolution without new YouTube searches)
+            stream_url, title, video_url, headers = await resolve_audio_info_async(query)
 
             if stream_url is None:
                 await ctx.send("Unable to retrieve audio stream.")
                 return
 
-            server_info = get_server_info(ctx.guild.id)
-            lock = get_server_lock(ctx.guild.id)
-            async with lock:
-                repeat_group = []
-                for i in range(n):
-                    track_counter += 1
-                    repeat_group.append({
-                        'ctx': ctx,
-                        'url': stream_url,
-                        'title': f"{title} (loop {i+1}/{n})",
-                        'video_url': video_url,
-                        'headers': headers,
-                        'track_number': track_counter
-                    })
-                if ctx.voice_client and ctx.voice_client.is_playing():
-                    server_info['audio_queue'].append(repeat_group)  # Add as a group
+            # All loop iterations share one collection id for !skip all
+            collection_id = str(uuid.uuid4())
+            async with get_server_lock(ctx.guild.id):
+                occupied = ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused())
+                async def enqueue_loop(i):
+                    await database.enqueue_track(
+                        guild_id=ctx.guild.id,
+                        title=f"{title} (loop {i}/{n})",
+                        webpage_url=video_url,
+                        search_query=query,
+                        collection_id=collection_id,
+                        collection_type='loop',
+                        requester_id=ctx.author.id,
+                        channel_id=ctx.channel.id
+                    )
+                if occupied:
+                    for i in range(1, n + 1):
+                        await enqueue_loop(i)
                     await ctx.send(f"Track added to queue: **{title}** (loop x{n})\n{video_url}")
                 else:
-                    # Play the first in the group, queue the rest as a group
-                    first, rest = repeat_group[0], repeat_group[1:]
-                    await play_audio(first['ctx'], first['url'], first['title'], first['video_url'], headers=first.get('headers'))
-                    if rest:
-                        server_info['audio_queue'].insert(0, rest)  # Play the rest as a group next
+                    # Play the first iteration now, queue the rest as a group
+                    for i in range(2, n + 1):
+                        await enqueue_loop(i)
+                    await play_audio(ctx.guild, ctx.channel, stream_url, f"{title} (loop 1/{n})", video_url,
+                                     headers=headers, collection_id=collection_id,
+                                     voice_channel=ctx.author.voice.channel)
         else:
             await ctx.send("You have to be in a voice channel to use this command!")
     except Exception as e:
@@ -736,45 +846,50 @@ async def repeat(ctx, n: int, *, query: str):
 @bot.command(help = "Stops current audio track and plays the next one in the queue. Use '!skip all' to skip the current repeat group.")
 async def skip(ctx, arg: str = None):
     server_info = get_server_info(ctx.guild.id)
-    lock = get_server_lock(ctx.guild.id)
-    async with lock:
+    async with get_server_lock(ctx.guild.id):
         if ctx.voice_client and ctx.voice_client.is_playing():
             if arg == "all":
-                current_title = server_info['current_track']['title'] if server_info['current_track'] else None
-                current_collection_id = server_info['current_track'].get('collection_id') if server_info['current_track'] else None
-                found = False
+                current = server_info.get('current_track') or {}
+                collection_id = current.get('collection_id')
                 
-                # Cancel loading task if active
-                if server_info['loading_task'] and not server_info['loading_task'].done():
-                    server_info['loading_task'].cancel()
-                    server_info['loading_task'] = None
-                
-                # If current track has collection_id, remove all tracks with same collection_id
-                if current_collection_id:
-                    server_info['audio_queue'] = [
-                        group for group in server_info['audio_queue']
-                        if not any(t.get('collection_id') == current_collection_id for t in group)
-                    ]
-                    found = True
-                else:
-                    # Fallback to old behavior for repeat loops
-                    for i, group in enumerate(server_info['audio_queue']):
-                        if any(current_title and current_title.split(" (loop")[0] in t['title'] for t in group):
-                            server_info['audio_queue'].pop(i)
-                            found = True
-                            break
+                # Cancel background playlist loading if still active
+                task = server_info.get('loading_task')
+                if task and not task.done():
+                    task.cancel()
+                server_info['loading_task'] = None
                 
                 ctx.voice_client.stop()
-                if found:
-                    await ctx.send("Skipped current track and the rest of the playlist/loop.")
+                
+                if collection_id:
+                    removed = await database.clear_collection(ctx.guild.id, collection_id)
+                    if removed > 0:
+                        await ctx.send(f"Skipped current track and {removed} more from the same playlist/album/loop.")
+                    else:
+                        await ctx.send("Skipped current track (no other tracks from that playlist/album/loop).")
                 else:
                     await ctx.send("Skipped current track (no playlist/loop found).")
             else:
                 ctx.voice_client.stop()
                 await ctx.send("Skipped current track.")
         else:
-            server_info['current_track'] = None
-            await ctx.send("No track to play.")
+            # Nothing playing: resume a persisted queue (e.g. after a restart)
+            async def resume_queue():
+                row = await database.claim_next_track(ctx.guild.id)
+                if row:
+                    await ctx.send("Resuming the persisted queue.")
+                    await play_queued_row(ctx.guild.id, row, autopilot=False, voice_channel=ctx.author.voice.channel)
+                else:
+                    server_info['current_track'] = None
+                    await ctx.send("No track to play.")
+            if ctx.author.voice:
+                await resume_queue()
+            else:
+                pending = await database.count_queue(ctx.guild.id)
+                if pending:
+                    await ctx.send("There is a queued track but you must be in a voice channel to resume it.")
+                else:
+                    server_info['current_track'] = None
+                    await ctx.send("No track to play.")
 
 # Command to pause current track
 @bot.command(help = "Pauses currently playing audio track.")
@@ -797,44 +912,48 @@ async def resume(ctx):
 # Command to show queued audio tracks
 @bot.command(help = "Shows queued audio tracks.")
 async def queue(ctx):
-    server_info = get_server_info(ctx.guild.id)
-    if server_info['audio_queue']:
-        queue_message = "**Queue:**\n"
-        for group in server_info['audio_queue']:
-            for track in group:
-                track_info = f"{track['track_number']}. {track['title']} ({track['video_url']})\n"
-                if len(queue_message) + len(track_info) <= 2000:
-                    queue_message += track_info
-                else:
-                    break
-        await ctx.send(queue_message)
-    else:
+    rows = await database.list_queue(ctx.guild.id)
+    total = await database.count_queue(ctx.guild.id)
+    if not rows:
         await ctx.send("Queue's empty.")
+        return
+    queue_message = "**Queue:**\n"
+    for row in rows:
+        line = f"{row['id']}. {row['title']} ({row['webpage_url']})\n"
+        if len(queue_message) + len(line) > 1900:
+            break
+        queue_message += line
+    if total > len(rows):
+        queue_message += f"...and {total - len(rows)} more."
+    await ctx.send(queue_message)
 
 # Command to show previously played audio tracks
 @bot.command(help = "Shows previously played audio tracks.")
 async def history(ctx):
-    server_info = get_server_info(ctx.guild.id)
-    if server_info['playback_history']:
-        history_message = "**Playback History (latest first):**\n"
-        # Show latest track first
-        for i, track in enumerate(reversed(server_info['playback_history']), 1):
-            track_info = f"{i}. {track['title']} ({track['video_url']})\n"
-            if len(history_message) + len(track_info) <= 2000:
-                history_message += track_info
-            else:
-                break
-        await ctx.send(history_message)
-    else:
+    rows = await database.list_history(ctx.guild.id)
+    if not rows:
         await ctx.send("No tracks have been played yet.")
+        return
+    history_message = "**Playback History (latest first):**\n"
+    for i, row in enumerate(rows, 1):
+        line = f"{i}. {row['title']} ({row['webpage_url']})\n"
+        if len(history_message) + len(line) > 1900:
+            break
+        history_message += line
+    await ctx.send(history_message)
 
 # Command to stop playback and disconnect PakoDJ
 @bot.command(help = "Stops playback and disconnects bot from voice channel.")
 async def stop(ctx):
     try:
         server_info = get_server_info(ctx.guild.id)
-        server_info['audio_queue'].clear()
+        # Cancel background playlist loading if still active
+        task = server_info.get('loading_task')
+        if task and not task.done():
+            task.cancel()
+        server_info['loading_task'] = None
         server_info['current_track'] = None
+        await database.clear_queue(ctx.guild.id)
         if ctx.voice_client and ctx.voice_client.is_connected():
             await ctx.voice_client.disconnect()
             await ctx.send("Track stopped and bot disconnected.")
@@ -843,9 +962,31 @@ async def stop(ctx):
     except Exception as e:
         print(f"Error in stop: {e}")
 
-# Event to log bot's successful connection on console
+# Event to log bot's successful connection on console (and init the DB)
 @bot.event
 async def on_ready():
+    try:
+        await database.init_db()
+    except Exception as e:
+        print(f"WARNING: database initialisation failed ({e}); queue features unavailable")
     print(f'Bot connected as {bot.user.name}')
+
+# Drop runtime + persisted queue when the bot leaves a server entirely
+@bot.event
+async def on_guild_remove(guild):
+    await database.clear_queue(guild.id)
+    get_server_info(guild.id)['current_track'] = None
+
+# Keep runtime state consistent if the bot leaves voice unexpectedly
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.id == bot.user.id and member.guild and after.channel is None:
+        server_info = get_server_info(member.guild.id)
+        task = server_info.get('loading_task')
+        if task and not task.done():
+            task.cancel()
+        server_info['loading_task'] = None
+        server_info['current_track'] = None
+        # The queue stays in the DB: '!skip' can resume it once back in voice
 
 bot.run(os.getenv('token'))

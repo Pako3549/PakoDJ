@@ -35,6 +35,8 @@
     - `python-dotenv`
     - `PyNaCl`
     - `spotipy`
+    - `asyncpg`
+- A **PostgreSQL** database reachable from the bot (with Docker Compose it is created automatically)
 ## ⚙️ Setup
 
 ### 🐳 Docker Setup (Recommended)
@@ -85,6 +87,8 @@ docker compose build
 3. **Configure the `.env` file**: Create a `.env` file in the `bot/` directory and add your bot token:
     ```env
     token=YOUR_BOT_TOKEN
+    # PostgreSQL connection (required when running without Docker Compose)
+    DATABASE_URL=postgres://pakodj:pakodj@localhost:5432/pakodj
     # Optional: For Spotify URL support
     SPOTIFY_CLIENT_ID=YOUR_SPOTIFY_CLIENT_ID
     SPOTIFY_CLIENT_SECRET=YOUR_SPOTIFY_CLIENT_SECRET
@@ -93,6 +97,19 @@ docker compose build
     ```bash
     python bot/main.py
     ```
+
+## 🗄️ Database Persistence
+
+Queues, playback history and background-loading playlists are stored in **PostgreSQL** instead of memory. This means:
+- **Queues survive bot restarts** (e.g. when the CI/CD pipeline redeploys the container). The queue is resumed automatically with the next `!play` / `!skip`.
+- **History is capped** by query: no more unbounded memory growth.
+- `!skip all` removes a whole playlist/album/loop group with a single SQL delete (no more fragile title matching).
+- Future web platform: a self-hosted PostgreSQL is ready to be read by an external app.
+
+With Docker Compose the database is started and connected automatically (`pakodj-db` service, persistent volume `pakodj-pgdata`, credentials `pakodj/pakodj`). Connection settings are injected via the `DATABASE_URL` environment variable:
+```env
+DATABASE_URL=postgres://user:password@host:5432/dbname
+```
 
 ### 🐳 Docker Management Commands
 - **View logs**: `docker-compose -f deploy/compose.yml logs -f pakodj`
@@ -149,23 +166,6 @@ sudo chown -R 1000:1000 logs
 - **Restart the runner**: `docker compose -f runner/compose.yml restart`
 
 After a successful push to `main`, check that the `deploy` job ran on your runner and that `pakodj` was restarted with the new image.
-
-## ⚠️ Age-Restricted (+18) YouTube Videos
-
-If you want to play age-restricted (+18) YouTube videos, you must provide your YouTube cookies to yt-dlp.  
-Please follow the official yt-dlp guides:
-
-- [How do I pass cookies to yt-dlp?](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)
-- [Exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)
-
-### For Docker Setup:
-After extracting your cookies, save them in a text file named `youtube_cookies.txt` in the `bot/` directory.  
-The Docker container will automatically mount this file and make it available to the bot.
-
-### For Manual Python Setup:
-After extracting your cookies, save them in a text file named `youtube_cookies.txt` in the same directory as the script that starts the bot (`bot/main.py`).
-
-This is required only for playing age-restricted content; for normal videos, no cookies are needed.
 
 ## 🎵 Spotify Integration
 
