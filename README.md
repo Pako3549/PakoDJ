@@ -84,11 +84,19 @@ docker compose build
     ```bash
     pip install -r bot/requirements.txt
     ```
-3. **Configure the `.env` file**: Create a `.env` file in the `bot/` directory and add your bot token:
+3. **Configure the `.env` file**: copy `bot/.env.example` to `bot/.env`, then create a `.env` file in the `bot/` directory and add your bot token (every variable is documented in the example file):
     ```env
     token=YOUR_BOT_TOKEN
     # PostgreSQL connection (required when running without Docker Compose)
     DATABASE_URL=postgres://pakodj:pakodj@localhost:5432/pakodj
+    # Web API login via Discord OAuth (needs a public origin, e.g. behind Cloudflare)
+    DISCORD_CLIENT_ID=your_discord_app_client_id
+    DISCORD_CLIENT_SECRET=your_discord_app_client_secret
+    API_PUBLIC_ORIGIN=https://api.yourdomain.com
+    # Discord IDs that get the admin flag (put yours here to be the owner)
+    DISCORD_ADMIN_IDS=123456789012345678
+    # Optional: Cloudflare Tunnel token (activates with: docker compose --profile tunnel up -d)
+    TUNNEL_TOKEN=your_cloudflare_tunnel_token
     # Optional: For Spotify URL support
     SPOTIFY_CLIENT_ID=YOUR_SPOTIFY_CLIENT_ID
     SPOTIFY_CLIENT_SECRET=YOUR_SPOTIFY_CLIENT_SECRET
@@ -110,6 +118,58 @@ With Docker Compose the database is started and connected automatically (`pakodj
 ```env
 DATABASE_URL=postgres://user:password@host:5432/dbname
 ```
+
+## 🔌 Web API
+
+The bot embeds an **HTTP API** (FastAPI) in its own process on port **8000**. It is a plain REST interface: any external client (web app, script, mobile app — in any language) can consume it.
+
+**Every endpoint requires a login session, and the only login method is Discord OAuth:**
+1. `GET /api/auth/discord/start` → returns the Discord authorize URL (open it, approve).
+2. Discord redirects back to `GET /api/auth/discord/callback?code=...&state=...` → the account (linked to the Discord user) is created and a `session_token` is returned (expires after `API_SESSION_TTL_DAYS`, default 7).
+3. Every other call needs the header `Authorization: Bearer <session_token>`.
+
+Sessions are stored server side (only their SHA-256), can be revoked by deleting the row or via `POST /api/auth/logout`. **When the API is exposed through Cloudflare, rate limiting is delegated to Cloudflare rules.**
+
+**Setup requirements:** set `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` and `API_PUBLIC_ORIGIN` (e.g. `https://api.yourdomain.com`) in `bot/.env`, and register the redirect URI `${API_PUBLIC_ORIGIN}/api/auth/discord/callback` in your Discord application (discord.com/developers → OAuth2). Users must share a server with the bot to log in. Discord IDs in `DISCORD_ADMIN_IDS=<id>,...` are always admin — put your own ID there and your account is the owner-admin from the first login. Until those env vars are set, the Discord endpoints answer `503` and every other endpoint answers `401` (no anonymous surface).
+
+**Roles:** every login auto-creates the account, but with the `nobody` role (no API surface: only `/api/auth/me` and the access-request endpoints). The owner-admin then grants access with the user-management endpoints:
+- `GET /api/users` — list accounts (id, username, role, seed flag, created_at, discord_id)
+- `PATCH /api/users/{id}` `{"role": "viewer"|"admin"|"nobody"}` — change a role
+
+`viewer` gets read-only access; `admin` gets playback control and user management. **Seeded admins are untouchable:** accounts whose Discord ID is in `DISCORD_ADMIN_IDS` carry the `seed` flag and are exclusively owned by the env — no API call and no other admin can ever change or demote them (`403`), and they are re-forced to `admin` at every login. Removing an ID from `DISCORD_ADMIN_IDS` revokes the seeded admin (that account falls back to `nobody` and becomes changeable at its next login). A role granted by an admin to a normal account survives logins.
+
+**Access requests (webapp onboarding):** a `nobody` user asks for access directly from the webapp:
+1. `GET /api/access/guilds` — servers where BOTH the user and the bot are (snapshot refreshed at every login)
+2. `POST /api/access-requests {"guild_id": ..., "message": "why I want access"}` — one pending request per guild, validated against that same list
+3. admins see the queue with `GET /api/access-requests` (username, guild, message) and resolve each one with `PATCH /api/access-requests/{id} {"status": "granted"|"denied"}` — granting the actual role is a separate `PATCH /api/users/{id}` call
+
+**No ports are published**: the API is reachable only from the Docker network (`http://pakodj:8000`). To expose it to the internet, the recommended path is **Cloudflare Tunnel** — see the next section. If you ever publish a port directly, bind it to localhost only (`127.0.0.1:8000:8000`, commented block in the compose files) and keep the public caller behind a reverse proxy.
+
+| Method | Endpoint | Auth | Description |
+| ------ | -------- | ---- | ----------- |
+| `GET` | `/api/auth/discord/start` | — | Returns the Discord OAuth authorize URL |
+| `GET` | `/api/auth/discord/callback` | — | Discord OAuth callback → session token |
+| `GET` | `/api/auth/me` | session | Current account (id, username, role) |
+| `POST` | `/api/auth/logout` | session | Revoke the session |
+| `GET` | `/api/users` | 🛠️ admin | List accounts and their roles |
+| `PATCH` | `/api/users/{id}` | 🛠️ admin | Change a role (`nobody`/`viewer`/`admin`) |
+| `GET` | `/api/access/guilds` | session | Guilds shared between the account and the bot |
+| `GET` | `/api/access-requests` | 🛠️ admin | Pending access requests (panel queue) |
+| `POST` | `/api/access-requests` | session | Submit an access request for a shared guild |
+| `PATCH` | `/api/access-requests/{id}` | 🛠️ admin | Resolve a request (`granted`/`denied`) |
+| `GET` | `/api/guilds` | viewer+ | Servers the bot is in |
+| `GET` | `/api/guilds/{id}/status` | viewer+ | Now playing + queue count + voice state |
+| `GET` | `/api/now-playing` | viewer+ | What every connected server is playing |
+| `GET` | `/api/guilds/{id}/queue` | viewer+ | Queue of a server |
+| `GET` | `/api/guilds/{id}/history` | viewer+ | History of a server |
+| `POST` | `/api/guilds/{id}/play` | 🛠️ admin | `{ "query": "..." }` — play or enqueue |
+| `POST` | `/api/guilds/{id}/skip` | 🛠️ admin | `{ "all": false }` — skip / skip all |
+| `POST` | `/api/guilds/{id}/pause` · `/resume` · `/stop` | 🛠️ admin | Playback controls |
+
+Optional: set `API_CORS_ORIGINS=https://your-webapp.example` in `bot/.env` if a browser-based frontend will call the API cross-origin (server-to-server clients don't need it).
+
+### Exposing to the internet (Cloudflare)
+When you put a web page in front of the API via Cloudflare Tunnel, **nothing in the app** needs to change: ports stay unpublished forever (cloudflared connects outbound to Cloudflare), TLS/DDoS/rate-limits are offloaded, and CORS only needs the real origin in `API_CORS_ORIGINS`. The in-app session auth and the outbound URL guard stay in place — see the security section.
 
 ### 🐳 Docker Management Commands
 - **View logs**: `docker-compose -f deploy/compose.yml logs -f pakodj`
@@ -153,6 +213,11 @@ The `deploy` job writes `bot/.env` on the runner from GitHub **repository secret
 | `DISCORD_TOKEN` | Yes | Bot token used at runtime |
 | `SPOTIFY_CLIENT_ID` | No | Spotify Integration |
 | `SPOTIFY_CLIENT_SECRET` | No | Spotify Integration |
+| `DISCORD_CLIENT_ID` | No | Web API: Discord OAuth login |
+| `DISCORD_CLIENT_SECRET` | No | Web API: Discord OAuth login |
+| `API_PUBLIC_ORIGIN` | No | Web API: public origin, e.g. https://api.yourdomain.com (with it, register the redirect `${API_PUBLIC_ORIGIN}/api/auth/discord/callback` in the Discord app) |
+| `DISCORD_ADMIN_IDS` | No | Web API: comma separated Discord IDs that get the admin flag (yours = owner) |
+| `TUNNEL_TOKEN` | No | Cloudflare Tunnel token (only with the `tunnel` compose profile) |
 
 For persistent log permissions on the host, run once:
 

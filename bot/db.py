@@ -47,6 +47,64 @@ CREATE TABLE IF NOT EXISTS collections (
     status     TEXT NOT NULL DEFAULT 'loading',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Real-time mirror of what is playing right now (for the web API).
+-- One row per guild, rewritten at every track start.
+CREATE TABLE IF NOT EXISTS now_playing (
+    guild_id     BIGINT PRIMARY KEY,
+    title        TEXT NOT NULL,
+    webpage_url  TEXT NOT NULL,
+    requester_id BIGINT,
+    started_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Web API accounts: created exclusively via Discord OAuth login.
+-- password_hash is kept for future needs (e.g. service accounts); Discord
+-- accounts always have it empty.
+-- role: nobody = logged in but no API surface yet, viewer = read-only,
+-- admin = playback control + user management. Admins are normally granted
+-- by their Discord ID (DISCORD_ADMIN_IDS) and refreshed at every login.
+-- seed = TRUE marks accounts created/owned by DISCORD_ADMIN_IDS: they are
+-- managed by the env only, no API call may ever change them.
+CREATE TABLE IF NOT EXISTS users (
+    id            SERIAL PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'nobody',
+    seed          BOOLEAN NOT NULL DEFAULT FALSE,
+    guild_ids     TEXT NOT NULL DEFAULT '',   -- JSON list: guilds shared with the bot, snapshot updated at each login
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    discord_id    TEXT
+);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'nobody';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS seed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS discord_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS guild_ids TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord ON users (discord_id);
+
+-- Access requests: 'nobody' users ask for webapp access on specific shared
+-- guilds; admins see the pending ones in the user-management panel.
+-- status: pending / granted / denied.
+CREATE TABLE IF NOT EXISTS access_requests (
+    id         SERIAL PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    guild_id   BIGINT NOT NULL,
+    guild_name TEXT NOT NULL DEFAULT '',
+    message    TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_pending
+    ON access_requests (user_id, guild_id) WHERE status = 'pending';
+
+-- Login sessions: only the SHA-256 of the session token is stored.
+CREATE TABLE IF NOT EXISTS api_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON api_sessions (expires_at);
 """
 
 INSERT_TRACK = """
@@ -162,6 +220,168 @@ async def list_history(guild_id, limit=50):
             "SELECT * FROM history WHERE guild_id = $1 ORDER BY id DESC LIMIT $2",
             guild_id, limit
         )
+
+
+# ---------------------------------------------------------------------------
+# Now playing (real-time mirror for the web API)
+# ---------------------------------------------------------------------------
+
+async def set_now_playing(guild_id, title, webpage_url, requester_id=None):
+    async with _pool_or_raise().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO now_playing (guild_id, title, webpage_url, requester_id) "
+            "VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (guild_id) DO UPDATE SET "
+            "title = EXCLUDED.title, webpage_url = EXCLUDED.webpage_url, "
+            "requester_id = EXCLUDED.requester_id, started_at = now()",
+            guild_id, title, webpage_url, requester_id
+        )
+
+
+async def clear_now_playing(guild_id):
+    async with _pool_or_raise().acquire() as conn:
+        await conn.execute("DELETE FROM now_playing WHERE guild_id = $1", guild_id)
+
+
+async def list_now_playing():
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetch("SELECT * FROM now_playing ORDER BY guild_id")
+
+
+# ---------------------------------------------------------------------------
+# Auth accounts & sessions (web API)
+# ---------------------------------------------------------------------------
+
+ROLES = ('nobody', 'viewer', 'admin')
+
+
+async def upsert_discord_user(discord_id, username, env_role):
+    """Create or update the Discord-linked account; the Discord ID is the
+    identity, username is the visible Discord display name.
+    env_role is 'admin' for discord_ids listed in DISCORD_ADMIN_IDS, else
+    'nobody'. Rules on login:
+    - env admin -> always role 'admin', seed=TRUE (env owns the account)
+    - non env member previously seeded (removed from DISCORD_ADMIN_IDS)
+      -> demoted to 'nobody' (env revocation, takes effect at this login)
+    - non seeded user -> granted role is preserved."""
+    seed = env_role == 'admin'
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetchrow(
+            "INSERT INTO users (username, discord_id, password_hash, role, seed) "
+            "VALUES ($2, $1, '', $3, $4) "
+            "ON CONFLICT (discord_id) DO UPDATE SET "
+            "username = EXCLUDED.username, seed = EXCLUDED.seed, "
+            "role = CASE "
+            "  WHEN EXCLUDED.seed THEN 'admin' "
+            "  WHEN users.seed THEN 'nobody' "
+            "  ELSE users.role END "
+            "RETURNING id, username, role, seed",
+            discord_id, username, env_role, seed
+        )
+
+
+async def list_users():
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetch(
+            "SELECT id, username, created_at, role, seed, discord_id FROM users "
+            "ORDER BY created_at"
+        )
+
+
+async def get_user_by_id(user_id):
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT id, username, role, seed, guild_ids, discord_id FROM users WHERE id = $1",
+            user_id
+        )
+
+
+async def set_user_guilds_snapshot(user_id, guild_ids_json):
+    """Store the guilds shared between the user and the bot (JSON list),
+    refreshed at every Discord login."""
+    async with _pool_or_raise().acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET guild_ids = $2 WHERE id = $1",
+            user_id, guild_ids_json
+        )
+
+
+async def create_access_request(user_id, guild_id, guild_name, message):
+    """Pending requests are unique per (user, guild); returns the new row id
+    or None when a pending request for the same guild already exists."""
+    async with _pool_or_raise().acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO access_requests (user_id, guild_id, guild_name, message) "
+            "VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT DO NOTHING "
+            "RETURNING id",
+            user_id, guild_id, guild_name, message
+        )
+        return row['id'] if row else None
+
+
+async def list_access_requests():
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetch(
+            "SELECT r.id, r.user_id, u.username, r.guild_id, r.guild_name, "
+            "r.message, r.status, r.created_at "
+            "FROM access_requests r JOIN users u ON u.id = r.user_id "
+            "WHERE r.status = 'pending' ORDER BY r.created_at"
+        )
+
+
+async def set_access_request_status(request_id, status):
+    """Resolve a request (granted/denied); returns the row or None."""
+    if status not in ('granted', 'denied'):
+        return None
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetchrow(
+            "UPDATE access_requests SET status = $2 WHERE id = $1 "
+            "RETURNING id, user_id, status",
+            request_id, status
+        )
+
+
+async def set_user_role(user_id, role):
+    """Change a granted user's role; returns the updated row, None if
+    unknown id. Seeded accounts are never updated through this call."""
+    if role not in ROLES:
+        return None
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetchrow(
+            "UPDATE users SET role = $2 WHERE id = $1 AND seed = FALSE "
+            "RETURNING id, username, role",
+            user_id, role
+        )
+
+
+async def create_session(user_id, token_hash, expires_at):
+    async with _pool_or_raise().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO api_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)",
+            token_hash, user_id, expires_at
+        )
+
+
+async def get_session_user(token_hash):
+    """Resolve a session token hash to its user; None if unknown/expired."""
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT u.id, u.username, u.role FROM api_sessions s "
+            "JOIN users u ON u.id = s.user_id "
+            "WHERE s.token_hash = $1 AND s.expires_at > now()",
+            token_hash
+        )
+
+
+async def delete_session(token_hash):
+    async with _pool_or_raise().acquire() as conn:
+        await conn.execute("DELETE FROM api_sessions WHERE token_hash = $1", token_hash)
+
+
+async def purge_expired_sessions():
+    async with _pool_or_raise().acquire() as conn:
+        await conn.execute("DELETE FROM api_sessions WHERE expires_at < now()")
 
 
 # ---------------------------------------------------------------------------

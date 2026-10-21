@@ -7,12 +7,27 @@ services:
       - ../bot/.env
     environment:
       DATABASE_URL: postgres://pakodj:pakodj@db:5432/pakodj
+      # Web API login happens via Discord OAuth (see Web API section in README);
+      # put these in bot/.env to enable it (until then the endpoints return 503):
+      # DISCORD_CLIENT_ID: your_discord_app_client_id
+      # DISCORD_CLIENT_SECRET: your_discord_app_client_secret
+      # API_PUBLIC_ORIGIN: https://api.yourdomain.com
+      # Discord IDs that get the admin flag (comma separated)
+      # DISCORD_ADMIN_IDS: 123456789012345678
+      # Optional: browser origins allowed to call the API (comma separated)
+      # API_CORS_ORIGINS: https://your-webapp.example
     depends_on:
       db:
         condition: service_healthy
     volumes:
       # Optional: Mount logs directory if you want to persist logs
       - ../logs:/app/logs
+
+    # Web API (8000) stays internal by design. Recommended exposure is
+    # via Cloudflare Tunnel (service block below, --profile tunnel), which
+    # publishes NO ports at all. A direct publish is for host testing ONLY:
+    # ports:
+    #   - "127.0.0.1:8000:8000"
 
   db:
     image: postgres:17-alpine
@@ -29,6 +44,22 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # Optional: expose the API to the internet through Cloudflare Tunnel,
+  # WITHOUT publishing any port (cloudflared connects outbound to CF edge).
+  # Enable with: docker compose --profile tunnel up -d
+  # Put TUNNEL_TOKEN in bot/.env (Cloudflare Zero Trust > Networks > Tunnels),
+  # then map the public hostname to service http://pakodj:8000 in the dashboard.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: pakodj-tunnel
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    command: tunnel --no-autoupdate run
+    depends_on:
+      - pakodj
 
 networks:
   default:

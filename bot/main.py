@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 import spotipy
 import shutil
 from spotipy.oauth2 import SpotifyClientCredentials
+import ipaddress
+import socket
+from urllib.parse import urlparse
 import db as database
 
 # Load environmental variables
@@ -90,8 +93,55 @@ def get_server_lock(guild_id):
         server_locks[guild_id] = asyncio.Lock()
     return server_locks[guild_id]
 
+# ---------------------------------------------------------------------------
+# URL safety guard (SSRF / local-file access prevention)
+# ---------------------------------------------------------------------------
+# User-supplied strings can reach yt-dlp. Restrict them to plain http(s)
+# URLs pointing at public hosts: no other scheme (file://, ftp://, ...) and
+# no host that is private/loopable from inside the Docker network.
+_BLACKLISTED_HOSTS = {
+    'localhost', 'host.docker.internal', 'metadata',
+    'metadata.google.internal', 'metadata.azure.internal',
+}
+
+def is_safe_http_url(url):
+    if not url or not (url.startswith('http://') or url.startswith('https://')):
+        return False
+    try:
+        host = (urlparse(url).hostname or '').strip().lower().rstrip('.')
+    except Exception:
+        return False
+    if not host or host in _BLACKLISTED_HOSTS:
+        return False
+    if '.' not in host:
+        return False  # single-label host = internal Docker service name (db, redis, ...)
+    try:
+        ip = ipaddress.ip_address(host)
+        if not ip.is_global:
+            return False  # loopback/private/link-local/ULA targets
+    except ValueError:
+        # Domain name: resolve it right here and verify EVERY resolved address,
+        # so a public-looking hostname can't redirect into the private network
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except OSError:
+            return False
+        for info in infos:
+            try:
+                addr = ipaddress.ip_address(info[4][0])
+            except ValueError:
+                return False
+            if not addr.is_global:
+                return False
+    except Exception:
+        return False
+    return True
+
 # Get audio function
 def get_audio_stream_url(url):
+    if not is_safe_http_url(url):
+        print(f"Blocked unsafe URL for audio extraction: {url[:120]}")
+        return None, None, None, None
     try:
         url = re.sub(r'&.*', '', url)
         ydl_opts = {
@@ -522,6 +572,8 @@ def after_playing(error, guild_id):
     async def next_track():
         lock = get_server_lock(guild_id)
         async with lock:
+            # The previous mirror (if any) is stale during the resolution gap
+            await database.clear_now_playing(guild_id)
             while True:
                 row = await database.claim_next_track(guild_id)
                 if row is None:
@@ -554,6 +606,7 @@ async def play_queued_row(guild_id, row, autopilot=True, voice_channel=None):
     if autopilot and (guild.voice_client is None or not guild.voice_client.is_connected()):
         # Bot is no longer in voice: nobody can hear the queue, wipe it
         await database.clear_queue(guild_id)
+        await database.clear_now_playing(guild_id)
         get_server_info(guild_id)['current_track'] = None
         return True
     
@@ -640,6 +693,8 @@ async def play_audio(guild, notify_channel, stream_url, title, video_url, header
         if collection_id:
             track_info['collection_id'] = collection_id
         get_server_info(guild.id)['current_track'] = track_info
+        # Real-time mirror for the web API (see api.py)
+        await database.set_now_playing(guild.id, title, video_url)
         return True
     except Exception as e:
         if notify_channel:
@@ -954,6 +1009,7 @@ async def stop(ctx):
         server_info['loading_task'] = None
         server_info['current_track'] = None
         await database.clear_queue(ctx.guild.id)
+        await database.clear_now_playing(ctx.guild.id)
         if ctx.voice_client and ctx.voice_client.is_connected():
             await ctx.voice_client.disconnect()
             await ctx.send("Track stopped and bot disconnected.")
@@ -962,19 +1018,53 @@ async def stop(ctx):
     except Exception as e:
         print(f"Error in stop: {e}")
 
+# ---------------------------------------------------------------------------
+# Web API (FastAPI inside the bot's event loop; never exposed by default)
+# ---------------------------------------------------------------------------
+_api_task = None
+
+def _start_api_server():
+    try:
+        import uvicorn
+        from api import create_api_app
+    except ImportError as e:
+        print(f"WARNING: FastAPI/uvicorn not installed - web API disabled ({e})")
+        return None
+    # Accounts are created via Discord OAuth login:
+    #   DISCORD_CLIENT_ID + DISCORD_CLIENT_SECRET + API_PUBLIC_ORIGIN -> login flow
+    #   DISCORD_ADMIN_IDS -> Discord IDs that get the admin flag
+    class APIServer(uvicorn.Server):
+        def install_signal_handlers(self):
+            pass  # the bot process owns the signal handlers
+    app = create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, get_server_lock)
+    config = uvicorn.Config(
+        app,
+        host=os.getenv('API_HOST', '0.0.0.0'),      # reachability is decided by published ports (none!)
+        port=int(os.getenv('API_PORT', '8000')),
+        log_level=os.getenv('API_LOG_LEVEL', 'warning'),
+    )
+    return APIServer(config)
+
 # Event to log bot's successful connection on console (and init the DB)
 @bot.event
 async def on_ready():
+    global _api_task
     try:
         await database.init_db()
     except Exception as e:
         print(f"WARNING: database initialisation failed ({e}); queue features unavailable")
+    if _api_task is None:
+        server = _start_api_server()
+        if server is not None:
+            _api_task = asyncio.create_task(server.serve())
+            print(f"Web API listening on port {os.getenv('API_PORT', '8000')} (account auth, internal only)")
     print(f'Bot connected as {bot.user.name}')
 
 # Drop runtime + persisted queue when the bot leaves a server entirely
 @bot.event
 async def on_guild_remove(guild):
     await database.clear_queue(guild.id)
+    await database.clear_now_playing(guild.id)
     get_server_info(guild.id)['current_track'] = None
 
 # Keep runtime state consistent if the bot leaves voice unexpectedly
@@ -987,6 +1077,7 @@ async def on_voice_state_update(member, before, after):
             task.cancel()
         server_info['loading_task'] = None
         server_info['current_track'] = None
+        await database.clear_now_playing(member.guild.id)
         # The queue stays in the DB: '!skip' can resume it once back in voice
 
 bot.run(os.getenv('token'))

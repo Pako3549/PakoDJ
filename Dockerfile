@@ -68,7 +68,7 @@ ENV PATH="/opt/venv/bin:/usr/local/bin:${PATH}"
 
 # Quick sanity checks
 RUN deno --version \
-    && python -c "import davey, discord, yt_dlp, nacl; print('all imports OK')"
+    && python -c "import davey, discord, yt_dlp, nacl, asyncpg, fastapi, uvicorn; print('all imports OK')"
 
 # Copy bot source code
 COPY bot/ .

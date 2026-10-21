@@ -76,6 +76,19 @@ jobs:
           echo "SPOTIFY_CLIENT_ID=${{ secrets.SPOTIFY_CLIENT_ID }}" >> bot/.env
           echo "SPOTIFY_CLIENT_SECRET=${{ secrets.SPOTIFY_CLIENT_SECRET }}" >> bot/.env
         fi
+        # Web API: Discord OAuth login (only active together with API_PUBLIC_ORIGIN)
+        echo "API_PUBLIC_ORIGIN=${{ secrets.API_PUBLIC_ORIGIN }}" >> bot/.env
+        if [ -n "${{ secrets.DISCORD_CLIENT_ID }}" ]; then
+          echo "DISCORD_CLIENT_ID=${{ secrets.DISCORD_CLIENT_ID }}" >> bot/.env
+          echo "DISCORD_CLIENT_SECRET=${{ secrets.DISCORD_CLIENT_SECRET }}" >> bot/.env
+        fi
+        if [ -n "${{ secrets.DISCORD_ADMIN_IDS }}" ]; then
+          echo "DISCORD_ADMIN_IDS=${{ secrets.DISCORD_ADMIN_IDS }}" >> bot/.env
+        fi
+        # Optional: Cloudflare Tunnel token (needed only with --profile tunnel)
+        if [ -n "${{ secrets.TUNNEL_TOKEN }}" ]; then
+          echo "TUNNEL_TOKEN=${{ secrets.TUNNEL_TOKEN }}" >> .env
+        fi
 
     - name: Pull and start container
       run: |
