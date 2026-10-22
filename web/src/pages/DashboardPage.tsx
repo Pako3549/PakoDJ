@@ -5,6 +5,7 @@ import { useAccount } from "@/lib/auth";
 import { readCache, writeCache } from "@/lib/cache";
 import ThemeToggle from "@/components/ThemeToggle";
 import ErrorBox from "@/components/ErrorBox";
+import RequestAccessPanel from "@/components/RequestAccessPanel";
 
 type Guild = { id: string; name: string };
 
@@ -20,7 +21,9 @@ export default function DashboardPage() {
   const [statuses, setStatuses] = useState<Statuses | null>(() => readCache<Statuses>("pakodj:guild-statuses", 20_000));
 
   useEffect(() => {
-    if (!account) return;
+    // Accounts without the view permission never read guild data; they get
+    // the access-request onboarding screen instead (nothing to fetch).
+    if (!account?.permissions.includes("view")) return;
     let alive = true;
     apiFetch<Guild[]>("/api/guilds")
       .then(async (gs) => {
@@ -46,6 +49,7 @@ export default function DashboardPage() {
   }, [account]);
 
   if (loading || !account) return error ? <ErrorBox message={error} /> : null;
+  if (!account.permissions.includes("view")) return <RequestAccessPanel account={account} />;
 
   const playing = statuses
     ? Object.values(statuses).filter((s) => s?.playing).length

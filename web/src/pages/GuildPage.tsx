@@ -57,6 +57,8 @@ export default function GuildPage() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [query, setQuery] = useState("");
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [previewing, setPreviewing] = useState<string | null>(null);
 
@@ -111,6 +113,28 @@ export default function GuildPage() {
       setError((err as Error).message);
     }
   };
+
+  // Optimistic batch reorder (drag & drop): reorder locally first, then let
+  // the API confirm; on error reload from the source of truth.
+  async function reorder(from: number, to: number) {
+    if (from === to || !canQueueManage) return;
+    const next = [...queue];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setQueue(next);
+    setDragIndex(null);
+    setOverIndex(null);
+    try {
+      await apiFetch(`/api/guilds/${guildId}/queue/reorder`, {
+        method: "POST",
+        body: JSON.stringify({ order: next.map((i) => i.id) }),
+      });
+      await reloadData();
+    } catch (err) {
+      setError((err as Error).message);
+      await reloadData();
+    }
+  }
 
   // ---------- search + enqueue ----------
   async function runSearch(e: React.FormEvent) {
@@ -255,22 +279,50 @@ export default function GuildPage() {
           <div className="p-4 space-y-1 max-h-[420px] overflow-y-auto">
             {queue.length === 0 && <p className="text-xs text-muted">Queue is empty</p>}
             {queue.map((item, index) => (
-              <div key={`${item.id}-${item.position}`} className="flex items-center gap-2 bg-surface border border-border rounded-lg p-2">
+              <div
+                key={`${item.id}-${item.position}`}
+                draggable={canQueueManage}
+                onDragStart={() => setDragIndex(index)}
+                onDragEnd={() => {
+                  setDragIndex(null);
+                  setOverIndex(null);
+                }}
+                onDragOver={(e) => {
+                  if (dragIndex !== null) e.preventDefault();
+                }}
+                onDragEnter={() => {
+                  if (dragIndex !== null && dragIndex !== index) setOverIndex(index);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (dragIndex !== null) reorder(dragIndex, index);
+                  setDragIndex(null);
+                  setOverIndex(null);
+                }}
+                className={`flex items-center gap-2 bg-surface border rounded-lg p-2 transition ${
+                  dragIndex === index
+                    ? "opacity-40 border-accent/60"
+                    : overIndex === index
+                      ? "border-accent/70 bg-accent/10"
+                      : "border-border"
+                }`}
+              >
+                {canQueueManage ? (
+                  <span className="cursor-grab active:cursor-grabbing text-muted" title="Drag to reorder">
+                    <svg viewBox="0 0 10 16" className="w-3 h-4" fill="currentColor" aria-hidden="true">
+                      {[2, 6, 10, 14].map((y) =>
+                        [3.5, 6.5].map((x) => <circle key={`${x}-${y}`} cx={x} cy={y} r="1.2" />)
+                      )}
+                    </svg>
+                  </span>
+                ) : (
+                  <span className="w-3" />
+                )}
                 <span className="text-xs text-muted w-6 text-right">{index + 1}</span>
                 <p className="flex-1 text-sm text-primary truncate">{item.title}</p>
                 {canQueueManage && (
-                  <div className="flex items-center gap-1">
-                    {index > 0 && (
-                      <button onClick={() => admin(`/api/guilds/${guildId}/queue/${item.id}`, { method: "PATCH", body: JSON.stringify({ position: item.position - 1 }) })}
-                        className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition">↑</button>
-                    )}
-                    {index < queue.length - 1 && (
-                      <button onClick={() => admin(`/api/guilds/${guildId}/queue/${item.id}`, { method: "PATCH", body: JSON.stringify({ position: item.position + 1 }) })}
-                        className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition">↓</button>
-                    )}
-                    <button onClick={() => admin(`/api/guilds/${guildId}/queue/${item.id}`, { method: "DELETE" })}
-                      className="px-2 py-1 rounded bg-card border border-border text-xs text-red-400 hover:text-red-300 transition">✕</button>
-                  </div>
+                  <button onClick={() => admin(`/api/guilds/${guildId}/queue/${item.id}`, { method: "DELETE" })}
+                    className="px-2 py-1 rounded bg-card border border-border text-xs text-red-400 hover:text-red-300 transition">✕</button>
                 )}
               </div>
             ))}

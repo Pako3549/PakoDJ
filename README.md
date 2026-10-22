@@ -173,7 +173,8 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `GET` | `/api/guilds/{id}/queue` | `view` | Queue of a server |
 | `GET` | `/api/search?q=` | `search` | Track metadata (free Deezer public API, server-cached) |
 | `POST` | `/api/guilds/{id}/queue` | `queue` | `{ "query": "...", "position": 0? }` — enqueue (append or at a position) |
-| `PATCH` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | `{ "position": n }` — reorder the queue |
+| `POST` | `/api/guilds/{id}/queue/reorder` | `queue_manage` | `{ "order": [item_id, ...] }` — batch rewrite of the queue order (drag & drop) |
+| `PATCH` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | `{ "position": n }` — move a single queued item |
 | `DELETE` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | Remove one queued item |
 | `DELETE` | `/api/guilds/{id}/queue` | `queue_manage` | Clear the queue |
 | `GET` | `/api/guilds/{id}/history` | `view` | History of a server |

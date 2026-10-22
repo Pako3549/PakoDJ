@@ -46,6 +46,10 @@ class QueueMoveRequest(BaseModel):
     position: int = Field(ge=0)
 
 
+class QueueReorderRequest(BaseModel):
+    order: list[int] = Field(max_length=500)
+
+
 class SkipRequest(BaseModel):
     all: bool = False
 
@@ -576,6 +580,16 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         if moved is None:
             raise HTTPException(status_code=404, detail="Queued item not found")
         return dict(moved)
+
+    @app.post("/api/guilds/{guild_id}/queue/reorder")
+    async def reorder_queue(
+        guild_id: int, body: QueueReorderRequest, admin: dict = Depends(_require_permission('queue_manage'))
+    ):
+        get_guild(guild_id)
+        count = await database.set_queue_order(guild_id, body.order)
+        if count == 0:
+            raise HTTPException(status_code=404, detail="No queued items matched")
+        return {"reordered": count}
 
     @app.delete("/api/guilds/{guild_id}/queue/{item_id}")
     async def remove_queued(guild_id: int, item_id: int, admin: dict = Depends(_require_permission('queue_manage'))):

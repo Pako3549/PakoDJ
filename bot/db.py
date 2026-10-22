@@ -308,6 +308,27 @@ async def list_queue(guild_id, limit=50):
         )
 
 
+async def set_queue_order(guild_id, order):
+    """Rewrite positions from the wanted item-id order (drag & drop batch).
+    Ids not listed keep their relative order after the listed ones; unknown
+    ids are ignored. Returns the number of rows renumbered. Positions are
+    plain BIGINTs (no unique constraint), so renumbering cannot clash."""
+    async with _pool_or_raise().acquire() as conn:
+        listed = await conn.fetch(
+            "SELECT id FROM queue_items WHERE guild_id = $1", guild_id
+        )
+        known = {r['id'] for r in listed}
+        wanted = [i for i in order if i in known]
+        rest = [r['id'] for r in listed if r['id'] not in set(wanted)]
+        final = wanted + rest
+        if final:
+            await conn.executemany(
+                "UPDATE queue_items SET position = $2 WHERE guild_id = $1 AND id = $3",
+                [(guild_id, idx, item_id) for idx, item_id in enumerate(final)]
+            )
+        return len(final)
+
+
 # ---------------------------------------------------------------------------
 # History
 # ---------------------------------------------------------------------------
@@ -391,6 +412,9 @@ async def upsert_discord_user(discord_id, username, avatar_hash, env_role):
       -> permissions wiped to [] (env revocation, takes effect at this login)
     - non seeded user -> granted permissions are preserved."""
     seed = env_role == 'admin'
+    # New accounts (non seeded) start WITHOUT permissions; the access-request
+    # flow onboards them. Only env admins inherit the full set at first login.
+    initial_permissions = ALL_PERMISSIONS_JSON if seed else '[]'
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetchrow(
             "INSERT INTO users (username, discord_id, avatar_hash, password_hash, permissions, seed) "
@@ -399,11 +423,11 @@ async def upsert_discord_user(discord_id, username, avatar_hash, env_role):
             "username = EXCLUDED.username, avatar_hash = EXCLUDED.avatar_hash, "
             "seed = EXCLUDED.seed, "
             "permissions = CASE "
-            "  WHEN EXCLUDED.seed THEN $4 "
+            "  WHEN EXCLUDED.seed THEN EXCLUDED.permissions "
             "  WHEN users.seed THEN '[]' "
             "  ELSE users.permissions END "
             "RETURNING id, username, permissions, seed",
-            discord_id, username, avatar_hash, ALL_PERMISSIONS_JSON, seed
+            discord_id, username, avatar_hash, initial_permissions, seed
         )
 
 
