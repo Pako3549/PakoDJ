@@ -76,7 +76,10 @@ platform must serve a future web app with concurrent readers.
 - **Per-guild overrides:** `user_guild_permissions` rows replace the global
   set inside that specific guild only (insert = override, delete = back to
   global). Endpoints whose path carries `guild_id` resolve the override
-  automatically.
+  automatically. `GET /api/guilds` encodes the same rule for the dashboard:
+  global `view` lists every bot guild; an account without it sees only the
+  guilds whose override carries `view` (this is how single-server access
+  requests are honoured with a scoped grant instead of a global one).
 - **Seeded admins (`DISCORD_ADMIN_IDS`, comma separated):** env is
   authoritative. At login the full permission set is forced and `seed=true`.
   No API call can change a seeded account (route returns `403`, plus SQL
@@ -86,7 +89,28 @@ platform must serve a future web app with concurrent readers.
   `GET /api/access/guilds` (intersection of the user's snapshot with live bot
   guilds) and posts `POST /api/access-requests` per guild; users with
   `manage_users` resolve with `PATCH /api/access-requests/{id}` and grant
-  `["view"]` via `PATCH /api/users/{id}`.
+  `["view"]` via `PATCH /api/users/{id}`. A request without `guild_id` is
+  **generic**: it is the onboarding path for accounts sharing no server with
+  the bot at all, stored with `guild_id IS NULL` (unique pending per user).
+  The shared-guilds snapshot is no longer login-only: the OAuth pair from
+  the last login is stored on the account and `GET /api/access/guilds`
+  (plus the guild-request check) refreshes it from Discord on every read,
+  so membership changes reach the panel without a re-login; failures fall
+  back to the stored snapshot. Both the admin user detail response and the
+  permission endpoints never return these token columns.
+  Each created request DMs every env admin (best effort, 10 s timeout,
+  silent failure) so the panel does not need watching; resolving a request
+  clears the row immediately via the follow-up reload in the web UI.
+- **Open login, closed API:** any Discord account can complete the OAuth
+  flow (the shared-server gate was dropped to make onboarding possible when
+  the bot and the user share nothing yet). A new account starts with an
+  empty permission set, so its only surface is `/api/auth/me` plus the two
+  access-request endpoints; the pending-request unique index caps one
+  generic request per account. Display-name collisions across different
+  Discord ids are disambiguated at upsert (`name-####` with the id tail)
+  instead of failing the login. Stray accounts can be deleted by managers
+  via `DELETE /api/users/{id}` (second `seed = FALSE` guard next to the
+  route check).
 
 ## API surface
 

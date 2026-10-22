@@ -10,7 +10,9 @@ type SharedGuild = { id: string; name: string };
 export default function RequestAccessPanel({ account }: { account: Account }) {
   const [guilds, setGuilds] = useState<SharedGuild[] | null>(null);
   const [requested, setRequested] = useState<Set<string>>(new Set());
+  const [genericRequested, setGenericRequested] = useState(false);
   const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
 
@@ -29,28 +31,55 @@ export default function RequestAccessPanel({ account }: { account: Account }) {
     };
   }, [account.id]);
 
+  const markDone = (label: string) => {
+    setInfo(label);
+    setError("");
+  };
+
   const request = useCallback(
     async (guild: SharedGuild) => {
-      setError("");
-      setInfo("");
+      setBusy(true);
       try {
         await apiFetch("/api/access-requests", {
           method: "POST",
           body: JSON.stringify({ guild_id: guild.id, message: message.trim() }),
         });
         setRequested((prev) => new Set([...prev, guild.id]));
-        setInfo(`Request for ${guild.name} sent.`);
+        markDone(`Request for ${guild.name} sent.`);
       } catch (err) {
         if (err instanceof Error && /pending/i.test(err.message)) {
           setRequested((prev) => new Set([...prev, guild.id]));
-          setInfo(`A request for ${guild.name} is already pending.`);
+          markDone(`A request for ${guild.name} is already pending.`);
         } else {
           setError((err as Error).message);
         }
+      } finally {
+        setBusy(false);
       }
     },
     [message]
   );
+
+  const requestGeneric = useCallback(async () => {
+    setBusy(true);
+    try {
+      await apiFetch("/api/access-requests", {
+        method: "POST",
+        body: JSON.stringify({ message: message.trim() }),
+      });
+      setGenericRequested(true);
+      markDone("Generic request sent.");
+    } catch (err) {
+      if (err instanceof Error && /pending/i.test(err.message)) {
+        setGenericRequested(true);
+        markDone("A generic request is already pending.");
+      } else {
+        setError((err as Error).message);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [message]);
 
   return (
     <main className="max-w-lg mx-auto px-4 py-12">
@@ -75,8 +104,9 @@ export default function RequestAccessPanel({ account }: { account: Account }) {
       {guilds === null ? (
         <p className="text-xs text-muted">Loading shared servers...</p>
       ) : guilds.length === 0 ? (
-        <p className="text-xs text-muted">
-          No shared servers. Join a server with the bot and log in again.
+        <p className="text-xs text-muted mb-2">
+          You share no server with the bot yet. You can still send a generic
+          request: an admin will review it and contact you on Discord.
         </p>
       ) : (
         <div className="space-y-2">
@@ -100,18 +130,44 @@ export default function RequestAccessPanel({ account }: { account: Account }) {
               )}
             </div>
           ))}
-          <label className="block mt-4 text-xs text-muted">
-            Optional note for the admins
-            <input
-              type="text"
-              value={message}
-              maxLength={200}
-              onChange={(e) => setMessage(e.target.value)}
-              placeholder="e.g. I use it for the Friday evening sessions"
-              className="mt-1 w-full px-3 py-2 rounded-lg bg-surface border border-border text-sm text-primary placeholder:text-muted focus:outline-none focus:border-accent/60"
-            />
-          </label>
         </div>
+      )}
+
+      {guilds !== null && (
+        <div className="mt-4 bg-card border border-border rounded-lg p-3">
+          <div className="flex items-center gap-3">
+            <span className="flex-1 text-sm text-secondary truncate">
+              Not in a listed server above? Ask for generic access.
+            </span>
+            {genericRequested ? (
+              <span className="text-xs text-muted px-3 py-1.5 rounded-lg border border-border">
+                requested
+              </span>
+            ) : (
+              <button
+                onClick={requestGeneric}
+                disabled={busy}
+                className="px-3 py-1.5 rounded-lg bg-card border border-border text-xs text-secondary hover:text-primary transition disabled:opacity-50"
+              >
+                Generic request
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {guilds !== null && (
+        <label className="block mt-4 text-xs text-muted">
+          Optional note for the admins
+          <input
+            type="text"
+            value={message}
+            maxLength={200}
+            onChange={(e) => setMessage(e.target.value)}
+            placeholder="e.g. I use it for the Friday evening sessions"
+            className="mt-1 w-full px-3 py-2 rounded-lg bg-surface border border-border text-sm text-primary placeholder:text-muted focus:outline-none focus:border-accent/60"
+          />
+        </label>
       )}
     </main>
   );

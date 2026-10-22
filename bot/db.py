@@ -88,6 +88,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS seed BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS discord_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS guild_ids TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_hash TEXT;
+-- Stored user OAuth pair: lets the access-panel refresh the shared-guilds
+-- snapshot lazily (join/leave detection) instead of only at every login.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS discord_access_token TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS discord_refresh_token TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS discord_token_expires TIMESTAMPTZ;
 -- Granular permissions: JSON array of permission keys over users.
 -- Legacy coarse roles are migrated once on load (guard = untouched default).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions TEXT NOT NULL DEFAULT '["view"]';
@@ -112,14 +117,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord ON users (discord_id);
 CREATE TABLE IF NOT EXISTS access_requests (
     id         SERIAL PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    guild_id   BIGINT NOT NULL,
+    guild_id   BIGINT,
     guild_name TEXT NOT NULL DEFAULT '',
     message    TEXT NOT NULL DEFAULT '',
     status     TEXT NOT NULL DEFAULT 'pending',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- One pending request per (user, guild);
+-- guild_id IS NULL means a generic request (no shared server at all).
+ALTER TABLE access_requests ALTER COLUMN guild_id DROP NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_pending
     ON access_requests (user_id, guild_id) WHERE status = 'pending';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_pending_generic
+    ON access_requests (user_id) WHERE guild_id IS NULL AND status = 'pending';
 
 -- Login sessions: only the SHA-256 of the session token is stored.
 CREATE TABLE IF NOT EXISTS api_sessions (
@@ -386,6 +396,20 @@ ROLES = ('nobody', 'viewer', 'admin')  # legacy coarse roles, kept for the migra
 PERMISSIONS = ('view', 'search', 'queue', 'queue_manage', 'playback', 'manage_users')
 ALL_PERMISSIONS_JSON = '["view","search","queue","queue_manage","playback","manage_users"]'
 
+# Shared by upsert_discord_user (used twice: original + disambiguated username).
+_UPSERT_DISCORD_USER_SQL = (
+    "INSERT INTO users (username, discord_id, avatar_hash, password_hash, permissions, seed) "
+    "VALUES ($2, $1, $3, '', $4, $5) "
+    "ON CONFLICT (discord_id) DO UPDATE SET "
+    "username = EXCLUDED.username, avatar_hash = EXCLUDED.avatar_hash, "
+    "seed = EXCLUDED.seed, "
+    "permissions = CASE "
+    "  WHEN EXCLUDED.seed THEN EXCLUDED.permissions "
+    "  WHEN users.seed THEN '[]' "
+    "  ELSE users.permissions END "
+    "RETURNING id, username, permissions, seed"
+)
+
 
 def normalize_permissions(raw):
     """Validate/dedupe a permission list; unknown keys are dropped."""
@@ -416,19 +440,21 @@ async def upsert_discord_user(discord_id, username, avatar_hash, env_role):
     # flow onboards them. Only env admins inherit the full set at first login.
     initial_permissions = ALL_PERMISSIONS_JSON if seed else '[]'
     async with _pool_or_raise().acquire() as conn:
-        return await conn.fetchrow(
-            "INSERT INTO users (username, discord_id, avatar_hash, password_hash, permissions, seed) "
-            "VALUES ($2, $1, $3, '', $4, $5) "
-            "ON CONFLICT (discord_id) DO UPDATE SET "
-            "username = EXCLUDED.username, avatar_hash = EXCLUDED.avatar_hash, "
-            "seed = EXCLUDED.seed, "
-            "permissions = CASE "
-            "  WHEN EXCLUDED.seed THEN EXCLUDED.permissions "
-            "  WHEN users.seed THEN '[]' "
-            "  ELSE users.permissions END "
-            "RETURNING id, username, permissions, seed",
-            discord_id, username, avatar_hash, initial_permissions, seed
-        )
+        try:
+            row = await conn.fetchrow(
+                _UPSERT_DISCORD_USER_SQL,
+                discord_id, username, avatar_hash, initial_permissions, seed
+            )
+        except asyncpg.UniqueViolationError:
+            # Login is open to any Discord account now, so global_name may
+            # collide across different Discord ids; disambiguate with the id
+            # tail instead of refusing the login.
+            row = await conn.fetchrow(
+                _UPSERT_DISCORD_USER_SQL,
+                discord_id, f"{username}-{discord_id[-4:]}", avatar_hash,
+                initial_permissions, seed
+            )
+    return row
 
 
 async def list_users():
@@ -449,7 +475,7 @@ async def get_user_by_id(user_id):
 
 async def set_user_guilds_snapshot(user_id, guild_ids_json):
     """Store the guilds shared between the user and the bot (JSON list),
-    refreshed at every Discord login."""
+    refreshed at every Discord login and on every access-panel read."""
     async with _pool_or_raise().acquire() as conn:
         await conn.execute(
             "UPDATE users SET guild_ids = $2 WHERE id = $1",
@@ -457,9 +483,22 @@ async def set_user_guilds_snapshot(user_id, guild_ids_json):
         )
 
 
+async def set_discord_oauth_tokens(user_id, access_token, refresh_token, expires_at):
+    """Persist the user OAuth pair from the latest login (or token refresh).
+    The access-panel endpoints use it to refresh the shared-guilds snapshot
+    lazily, so joining or leaving a server does not need a re-login."""
+    async with _pool_or_raise().acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET discord_access_token = $2, discord_refresh_token = $3, "
+            "discord_token_expires = $4 WHERE id = $1",
+            user_id, access_token, refresh_token, expires_at
+        )
+
+
 async def create_access_request(user_id, guild_id, guild_name, message):
-    """Pending requests are unique per (user, guild); returns the new row id
-    or None when a pending request for the same guild already exists."""
+    """Pending requests are unique per (user, guild); guild_id may be None for
+    a generic request (unique per user alone). Returns the new row id or None
+    when the equivalent pending request already exists."""
     async with _pool_or_raise().acquire() as conn:
         row = await conn.fetchrow(
             "INSERT INTO access_requests (user_id, guild_id, guild_name, message) "
@@ -505,6 +544,18 @@ async def set_user_permissions(user_id, permissions):
             "RETURNING id, username, permissions",
             user_id, payload
         )
+
+
+async def delete_discord_user(user_id):
+    """Remove a non-seed account (api_sessions, access_requests and
+    user_guild_permissions cascade from the users FK). The WHERE clause is
+    the second enforcement of the seeded-admin protection on top of the
+    route check; returns True when a row was actually deleted."""
+    async with _pool_or_raise().acquire() as conn:
+        status = await conn.execute(
+            "DELETE FROM users WHERE id = $1 AND seed = FALSE", user_id
+        )
+        return status == 'DELETE 1'
 
 
 async def get_user_guild_permissions(user_id, guild_id):
@@ -564,7 +615,9 @@ async def get_session_user(token_hash):
     """Resolve a session token hash to its user; None if unknown/expired."""
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetchrow(
-            "SELECT u.id, u.username, u.permissions, u.avatar_hash, u.discord_id FROM api_sessions s "
+            "SELECT u.id, u.username, u.permissions, u.avatar_hash, u.discord_id, u.guild_ids, "
+            "u.discord_access_token, u.discord_refresh_token, u.discord_token_expires "
+            "FROM api_sessions s "
             "JOIN users u ON u.id = s.user_id "
             "WHERE s.token_hash = $1 AND s.expires_at > now()",
             token_hash

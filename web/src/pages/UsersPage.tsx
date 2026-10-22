@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 import { useAccount, PERMISSIONS } from "@/lib/auth";
 import { useEscapeBack } from "@/lib/useEscapeBack";
 import { readCache, writeCache } from "@/lib/cache";
@@ -18,19 +18,29 @@ type User = {
 
 type GuildOverride = { guild_id: string; permissions: string[] };
 
-type UserDetail = User & { guild_overrides: GuildOverride[] };
+type UserDetail = User & { guild_overrides: GuildOverride[]; guild_ids: string };
 
 type AccessRequest = {
   id: number;
   user_id: number;
   username: string;
-  guild_id: number;
+  guild_id: number | null;
   guild_name: string;
   message: string;
   created_at: string;
 };
 
 type Guild = { id: string; name: string };
+
+// Edited-but-not-saved local state; nothing is pushed until Save.
+type RowStaged = { permissions: string[]; removed: boolean };
+
+const same = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
+
+// Toggling helper: add the permission when missing, remove when present.
+function withPermission(list: string[], perm: string, on: boolean): string[] {
+  return on ? [...new Set([...list, perm])] : list.filter((p) => p !== perm);
+}
 
 // Short human descriptions next to the toggles.
 const PERMISSION_DESC: Record<string, string> = {
@@ -41,10 +51,6 @@ const PERMISSION_DESC: Record<string, string> = {
   playback: "Pause, resume, skip and stop",
   manage_users: "Manage accounts, permissions and requests",
 };
-
-function withPermission(list: string[], perm: string, on: boolean): string[] {
-  return on ? [...new Set([...list, perm])] : list.filter((p) => p !== perm);
-}
 
 function Avatar({ src, name, size = "w-9 h-9" }: { src: string | null; name: string; size?: string }) {
   if (src) return <img src={src} alt="" className={`${size} rounded-full`} />;
@@ -75,28 +81,60 @@ function Chip({
   active,
   onClick,
   disabled,
-  title,
-  children,
+  label,
 }: {
   active: boolean;
   onClick: () => void;
   disabled?: boolean;
-  title?: string;
-  children: React.ReactNode;
+  label: string;
 }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      title={title}
+      title={PERMISSION_DESC[label]}
       className={`px-2.5 py-1 text-xs rounded-full border transition ${
         active
           ? "bg-accent/20 border-accent/40 text-accent font-medium"
           : "border-border text-muted hover:text-secondary hover:border-accent/30"
       } disabled:opacity-40`}
     >
-      {children}
+      {label}
     </button>
+  );
+}
+
+function SaveCancel({
+  onSave,
+  onReset,
+  busy,
+  dirty,
+  saveLabel = "Save",
+}: {
+  onSave: () => void;
+  onReset: () => void;
+  busy: boolean;
+  dirty: boolean;
+  saveLabel?: string;
+}) {
+  if (!dirty) return null;
+  return (
+    <span className="flex items-center gap-2">
+      <button
+        onClick={onSave}
+        disabled={busy}
+        className="px-3 py-1 rounded-lg bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition disabled:opacity-50"
+      >
+        {saveLabel}
+      </button>
+      <button
+        onClick={onReset}
+        disabled={busy}
+        className="px-2 py-1 rounded-lg bg-card border border-border text-xs text-secondary hover:text-primary transition disabled:opacity-50"
+      >
+        Reset
+      </button>
+    </span>
   );
 }
 
@@ -113,6 +151,14 @@ export default function UsersPage() {
   const [details, setDetails] = useState<Record<number, UserDetail | "loading">>({});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+
+  // Staged edits (keyed per account / per override row); cleared after Save.
+  const [stagedGlobal, setStagedGlobal] = useState<Record<number, string[]>>({});
+  const [stagedGuild, setStagedGuild] = useState<Record<string, RowStaged>>({});
+  // New override picked from the select but not saved yet: also per account.
+  const [pendingGuild, setPendingGuild] = useState<Record<number, string | null>>({});
+  const [pendingStaged, setPendingStaged] = useState<Record<number, string[]>>({});
+  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -138,20 +184,30 @@ export default function UsersPage() {
 
   if (loading || !account) return authError ? <ErrorBox message={authError} /> : null;
 
-  async function run(key: string, fn: () => Promise<unknown>) {
+  async function run(key: string, fn: () => Promise<unknown>): Promise<boolean> {
     setBusy(key);
     setError("");
     try {
       await fn();
-      await reload();
-      // Keep the open editor live with fresh override data.
+      const fresh = await apiFetch<User[]>("/api/users");
+      setUsers(fresh);
       const editorId = openId;
-      if (editorId !== null) {
-        const fresh = await apiFetch<UserDetail>(`/api/users/${editorId}`);
-        setDetails((d) => ({ ...d, [editorId]: fresh }));
+      // Skip the detail refresh when the open account no longer exists
+      // (just deleted with its editor open: the 404 must not surface).
+      if (
+        editorId !== null &&
+        details[editorId] &&
+        details[editorId] !== "loading" &&
+        fresh.some((usr) => usr.id === editorId)
+      ) {
+        const freshDetail = await apiFetch<UserDetail>(`/api/users/${editorId}`);
+        setDetails((d) => ({ ...d, [editorId]: freshDetail }));
       }
+      setError("");
+      return true;
     } catch (err) {
       setError((err as Error).message);
+      return false;
     } finally {
       setBusy(null);
     }
@@ -160,6 +216,16 @@ export default function UsersPage() {
   const openEditor = (u: User) => {
     const next = openId === u.id ? null : u.id;
     setOpenId(next);
+    // Closing an editor wipes its unapplied staging: explicit, expected.
+    if (next === null) {
+      setStagedGlobal((s) => { const c = { ...s }; delete c[u.id]; return c; });
+      setPendingGuild((s) => { const c = { ...s }; delete c[u.id]; return c; });
+      setPendingStaged((s) => { const c = { ...s }; delete c[u.id]; return c; });
+      setConfirmDelete(null);
+      setStagedGuild((s) =>
+        Object.fromEntries(Object.entries(s).filter(([k]) => !k.startsWith(`${u.id}:`)))
+      );
+    }
     if (next !== null && !details[next]) {
       setDetails((d) => ({ ...d, [next]: "loading" }));
       apiFetch<UserDetail>(`/api/users/${next}`)
@@ -168,53 +234,109 @@ export default function UsersPage() {
     }
   };
 
-  const toggleGlobal = (userId: number, perm: string, next: boolean) => {
-    const user = users?.find((u) => u.id === userId);
-    if (!user) return;
-    setUsers((list) =>
-      (list ?? []).map((u) => (u.id === userId ? { ...u, permissions: withPermission(u.permissions, perm, next) } : u))
-    );
-    run(`global:${userId}`, () =>
-      apiFetch(`/api/users/${userId}`, {
+  const permsFor = (u: User) => stagedGlobal[u.id] ?? u.permissions;
+  const globalDirty = (u: User) => u.id in stagedGlobal && !same(stagedGlobal[u.id], u.permissions);
+
+  // Guilds the target account shares with the bot (snapshot from its last
+  // login, stored as JSON in the users row); an empty snapshot means it is
+  // in none of them.
+  const sharedGuildIds = (u: User): string[] => {
+    const d = details[u.id];
+    if (!d || d === "loading") return [];
+    try {
+      const parsed = JSON.parse((d as { guild_ids?: string }).guild_ids ?? "[]");
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const saveGlobal = (u: User) => {
+    const staged = stagedGlobal[u.id];
+    if (!staged) return;
+    run(`global:${u.id}`, () =>
+      apiFetch(`/api/users/${u.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ permissions: withPermission(user.permissions, perm, next) }),
+        body: JSON.stringify({ permissions: staged }),
       })
+    ).then(() => setStagedGlobal((s) => { const c = { ...s }; delete c[u.id]; return c; }));
+  };
+
+  const overrideFor = (u: User, o: GuildOverride): RowStaged => {
+    const st = stagedGuild[`${u.id}:${o.guild_id}`];
+    return { permissions: st?.permissions ?? o.permissions, removed: st?.removed ?? false };
+  };
+  const overrideDirty = (u: User, o: GuildOverride) => {
+    const st = stagedGuild[`${u.id}:${o.guild_id}`];
+    if (!st) return false;
+    if (st.removed) return true;
+    return !same(st.permissions, o.permissions);
+  };
+
+  const saveOverride = (u: User, o: GuildOverride) => {
+    const st = stagedGuild[`${u.id}:${o.guild_id}`];
+    if (!st) return;
+    const req = st.removed
+      ? apiFetch(`/api/users/${u.id}/guilds/${o.guild_id}`, { method: "DELETE" })
+      : apiFetch(`/api/users/${u.id}/guilds/${o.guild_id}`, {
+          method: "PUT",
+          body: JSON.stringify({ permissions: st.permissions }),
+        });
+    run(`guild:${u.id}:${o.guild_id}`, () => req).then(() =>
+      setStagedGuild((s) => { const c = { ...s }; delete c[`${u.id}:${o.guild_id}`]; return c; })
     );
   };
 
-  const toggleGuild = (userId: number, guildId: string, permissions: string[], perm: string, next: boolean) =>
-    run(`guild:${userId}:${guildId}`, () =>
-      apiFetch(`/api/users/${userId}/guilds/${guildId}`, {
+  const pendingRow = (u: User): { guildId: string; permissions: string[] } | null => {
+    const gid = pendingGuild[u.id];
+    return gid ? { guildId: gid, permissions: pendingStaged[u.id] ?? ["view"] } : null;
+  };
+
+  const savePending = (u: User) => {
+    const row = pendingRow(u);
+    if (!row) return;
+    run(`guild:${u.id}:${row.guildId}`, () =>
+      apiFetch(`/api/users/${u.id}/guilds/${row.guildId}`, {
         method: "PUT",
-        body: JSON.stringify({ permissions: withPermission(permissions, perm, next) }),
+        body: JSON.stringify({ permissions: row.permissions }),
       })
-    );
+    ).then(() => {
+      setPendingGuild((s) => { const c = { ...s }; delete c[u.id]; return c; });
+      setPendingStaged((s) => { const c = { ...s }; delete c[u.id]; return c; });
+    });
+  };
 
-  const addOverride = (userId: number, guildId: string) =>
-    run(`guild:${userId}:${guildId}`, () =>
-      apiFetch(`/api/users/${userId}/guilds/${guildId}`, {
-        method: "PUT",
-        body: JSON.stringify({ permissions: ["view"] }),
-      })
-    );
-
-  const removeOverride = (userId: number, guildId: string) =>
-    run(`guild:${userId}:${guildId}`, () =>
-      apiFetch(`/api/users/${userId}/guilds/${guildId}`, { method: "DELETE" })
-    );
-
-  const grantAccess = (userId: number, requestId: number) =>
+  // Resolving a request must immediately empty the queue row: the follow-up
+  // reload pulls users + requests in one go (no manual page refresh).
+  // A guild request grants `view` ONLY inside that guild (per-guild override,
+  // the global set stays untouched); a generic request grants global view.
+  const grantAccess = (userId: number, requestId: number, guildId: number | null) =>
     run(`global:${userId}`, () =>
-      apiFetch(`/api/users/${userId}`, {
-        method: "PATCH",
-        body: JSON.stringify({ permissions: ["view"] }),
-      }).then(() =>
+      (guildId === null
+        ? apiFetch(`/api/users/${userId}`, {
+            method: "PATCH",
+            body: JSON.stringify({ permissions: ["view"] }),
+          })
+        : apiFetch(`/api/users/${userId}/guilds/${guildId}`, {
+            method: "PUT",
+            body: JSON.stringify({ permissions: ["view"] }),
+          })
+      ).then(() =>
         apiFetch(`/api/access-requests/${requestId}`, {
           method: "PATCH",
           body: JSON.stringify({ status: "granted" }),
         })
       )
-    );
+    ).then((ok) => {
+      if (ok) reload();
+    });
+
+  // Account removal: discrete two-step action (confirm button appears first).
+  const deleteUser = (userId: number) =>
+    run(`delete:${userId}`, () => apiFetch(`/api/users/${userId}`, { method: "DELETE" })).then(() => {
+      setConfirmDelete(null);
+      setOpenId((prev) => (prev === userId ? null : prev));
+    });
 
   const denyRequest = (requestId: number) =>
     run(`deny:${requestId}`, () =>
@@ -222,7 +344,9 @@ export default function UsersPage() {
         method: "PATCH",
         body: JSON.stringify({ status: "denied" }),
       })
-    );
+    ).then((ok) => {
+      if (ok) reload();
+    });
 
   const myId = account.id;
   const avatarByUserId = new Map((users ?? []).map((u) => [u.id, u.avatar_url]));
@@ -273,16 +397,22 @@ export default function UsersPage() {
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-primary truncate">{r.username}</p>
                   <p className="text-xs text-secondary truncate">
-                    wants <span className="text-muted">{r.guild_name || r.guild_id}</span>
+                    {r.guild_id === null ? (
+                      <>wants <span className="text-muted">generic access (no shared server)</span></>
+                    ) : (
+                      <>
+                        wants <span className="text-muted">{r.guild_name || r.guild_id}</span>
+                      </>
+                    )}
                     {r.message && <span> · {r.message}</span>}
                   </p>
                 </div>
                 <button
-                  onClick={() => grantAccess(r.user_id, r.id)}
+                  onClick={() => grantAccess(r.user_id, r.id, r.guild_id)}
                   disabled={busy !== null}
                   className="px-3 py-1.5 rounded-lg bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition disabled:opacity-50"
                 >
-                  Grant view
+                  {r.guild_id === null ? "Grant view" : "Grant"}
                 </button>
                 <button
                   onClick={() => denyRequest(r.id)}
@@ -312,6 +442,10 @@ export default function UsersPage() {
             const detail = details[u.id];
             const detailData = detail && detail !== "loading" ? detail : null;
             const overridden = new Set((detailData?.guild_overrides ?? []).map((o) => o.guild_id));
+            const anyDirty =
+              globalDirty(u) ||
+              (detailData?.guild_overrides ?? []).some((o) => overrideDirty(u, o)) ||
+              pendingGuild[u.id] !== undefined;
             return (
               <div key={u.id} className="px-4 py-3">
                 <div className="flex items-center gap-3">
@@ -326,14 +460,14 @@ export default function UsersPage() {
                         {u.username}
                         {u.id === myId && <span className="text-xs text-muted">(you)</span>}
                         {u.seed && <SeedBadge />}
+                        {anyDirty && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/20 text-accent">
+                            unsaved
+                          </span>
+                        )}
                       </span>
                       <span className="block text-xs text-muted truncate">
-                        {u.permissions.length
-                          ? u.permissions.join(" · ")
-                          : "no permissions yet"}
-                        {detailData && detailData.guild_overrides.length > 0 && (
-                          <span> · {detailData.guild_overrides.length} guild override(s)</span>
-                        )}
+                        {permsFor(u).length ? permsFor(u).join(" · ") : "no permissions yet"}
                       </span>
                     </span>
                   </button>
@@ -361,83 +495,199 @@ export default function UsersPage() {
                         <p className="text-[11px] uppercase tracking-wide text-muted mb-2">
                           Global permissions
                         </p>
-                        <div className="flex flex-wrap gap-1.5 mb-1">
+                        <div className="flex flex-wrap gap-1.5 items-center mb-2">
                           {PERMISSIONS.map((perm) => (
                             <Chip
                               key={perm}
-                              active={u.permissions.includes(perm)}
+                              active={permsFor(u).includes(perm)}
                               disabled={busy !== null}
-                              title={PERMISSION_DESC[perm]}
-                              onClick={() => toggleGlobal(u.id, perm, !u.permissions.includes(perm))}
-                            >
-                              {perm}
-                            </Chip>
+                              label={perm}
+                              onClick={() =>
+                                setStagedGlobal((s) => ({
+                                  ...s,
+                                  [u.id]: withPermission(permsFor(u), perm, !permsFor(u).includes(perm)),
+                                }))
+                              }
+                            />
                           ))}
+                          <SaveCancel
+                            busy={busy !== null}
+                            dirty={globalDirty(u)}
+                            onSave={() => saveGlobal(u)}
+                            onReset={() => setStagedGlobal((s) => { const c = { ...s }; delete c[u.id]; return c; })}
+                          />
                         </div>
-                        <p className="text-[11px] text-muted mb-4">
-                          {PERMISSION_DESC[u.permissions[0]] ?? "Empty set: the account reads nothing but can still ask for access."}
-                        </p>
 
                         <p className="text-[11px] uppercase tracking-wide text-muted mb-2">
-                          Per-guild overrides (replace the global set inside that guild)
+                          Per-guild overrides
                         </p>
                         {detail === undefined || detail === "loading" ? (
                           <p className="text-xs text-muted mb-4">Loading overrides...</p>
                         ) : (
                           <div className="space-y-2 mb-3">
-                            {detailData === null || detailData.guild_overrides.length === 0 ? (
-                              <p className="text-xs text-muted">No override: the global set applies everywhere.</p>
+                            {detailData === null ||
+                            (detailData.guild_overrides.length === 0 && pendingRow(u) === null) ? (
+                              sharedGuildIds(u).length === 0 ? (
+                                <p className="text-xs text-muted">
+                                  This account shares no server with the bot yet.
+                                </p>
+                              ) : (
+                                <p className="text-xs text-muted">
+                                  No override: the global set applies everywhere.
+                                </p>
+                              )
                             ) : (
-                              detailData &&
-                              detailData.guild_overrides.map((o) => (
-                                <div
-                                  key={o.guild_id}
-                                  className="flex items-center gap-3 flex-wrap bg-surface border border-border rounded-lg p-2"
-                                >
-                                  <span className="text-xs text-secondary w-40 truncate" title={o.guild_id}>
-                                    {guilds.find((g) => g.id === o.guild_id)?.name ?? o.guild_id}
-                                  </span>
-                                  <div className="flex flex-wrap gap-1.5 flex-1">
-                                    {PERMISSIONS.map((perm) => (
-                                      <Chip
-                                        key={perm}
-                                        active={o.permissions.includes(perm)}
-                                        disabled={busy !== null}
-                                        title={PERMISSION_DESC[perm]}
-                                        onClick={() =>
-                                          toggleGuild(u.id, o.guild_id, o.permissions, perm, !o.permissions.includes(perm))
-                                        }
+                              <>
+                                {detailData &&
+                                  detailData.guild_overrides.map((o) => {
+                                    const row = overrideFor(u, o);
+                                    const dirty = overrideDirty(u, o);
+                                    return (
+                                      <div
+                                        key={o.guild_id}
+                                        className={`flex items-center gap-3 flex-wrap bg-surface border rounded-lg p-2 ${
+                                          row.removed ? "opacity-60 border-red-500/40" : "border-border"
+                                        }`}
                                       >
-                                        {perm}
-                                      </Chip>
-                                    ))}
-                                  </div>
-                                  <button
-                                    onClick={() => removeOverride(u.id, o.guild_id)}
+                                        <span className="text-xs text-secondary w-40 truncate" title={o.guild_id}>
+                                          {guilds.find((g) => g.id === o.guild_id)?.name ?? o.guild_id}
+                                        </span>
+                                        {!row.removed && (
+                                          <div className="flex flex-wrap gap-1.5 flex-1">
+                                            {PERMISSIONS.map((perm) => (
+                                              <Chip
+                                                key={perm}
+                                                active={row.permissions.includes(perm)}
+                                                disabled={busy !== null}
+                                                label={perm}
+                                                onClick={() =>
+                                                  setStagedGuild((s) => ({
+                                                    ...s,
+                                                    [`${u.id}:${o.guild_id}`]: {
+                                                      permissions: withPermission(row.permissions, perm, !row.permissions.includes(perm)),
+                                                      removed: false,
+                                                    },
+                                                  }))
+                                                }
+                                              />
+                                            ))}
+                                          </div>
+                                        )}
+                                        <button
+                                          onClick={() =>
+                                            setStagedGuild((s) => ({
+                                              ...s,
+                                              [`${u.id}:${o.guild_id}`]: {
+                                                permissions: row.permissions,
+                                                removed: !row.removed,
+                                              },
+                                            }))
+                                          }
+                                          disabled={busy !== null}
+                                          className="px-2 py-1 rounded bg-card border border-border text-xs text-red-400 hover:text-red-300 transition disabled:opacity-40"
+                                        >
+                                          {row.removed ? "Keep" : "Remove"}
+                                        </button>
+                                        <SaveCancel
+                                          busy={busy !== null}
+                                          dirty={dirty}
+                                          saveLabel={row.removed ? "Delete" : "Save"}
+                                          onSave={() => saveOverride(u, o)}
+                                          onReset={() =>
+                                            setStagedGuild((s) => { const c = { ...s }; delete c[`${u.id}:${o.guild_id}`]; return c; })
+                                          }
+                                        />
+                                      </div>
+                                    );
+                                  })}
+                                {pendingRow(u) === null ? (
+                                  <select
+                                    value=""
                                     disabled={busy !== null}
-                                    className="px-2 py-1 rounded bg-card border border-border text-xs text-red-400 hover:text-red-300 transition disabled:opacity-40"
+                                    onChange={(e) => e.target.value && setPendingGuild((s) => ({ ...s, [u.id]: e.target.value }))}
+                                    className="px-3 py-2 rounded-lg bg-card border border-border text-xs text-secondary"
                                   >
-                                    Remove
-                                  </button>
-                                </div>
-                              ))
+                                    <option value="">Override a specific server...</option>
+                                    {guilds
+                                      .filter((g) => !overridden.has(g.id))
+                                      .map((g) => (
+                                        <option key={g.id} value={g.id}>{g.name}</option>
+                                      ))}
+                                  </select>
+                                ) : (
+                                  pendingRow(u) && (
+                                    <div className="flex items-center gap-3 flex-wrap bg-surface border border-accent/50 border-dashed rounded-lg p-2">
+                                      <span className="text-xs text-secondary w-40 truncate">
+                                        {guilds.find((g) => g.id === pendingRow(u)!.guildId)?.name ?? pendingRow(u)!.guildId}
+                                      </span>
+                                      <div className="flex flex-wrap gap-1.5 flex-1">
+                                        {PERMISSIONS.map((perm) => (
+                                          <Chip
+                                            key={perm}
+                                            active={pendingRow(u)!.permissions.includes(perm)}
+                                            disabled={busy !== null}
+                                            label={perm}
+                                            onClick={() =>
+                                              setPendingStaged((s) => ({
+                                                ...s,
+                                                [u.id]: withPermission(pendingRow(u)!.permissions, perm, !pendingRow(u)!.permissions.includes(perm)),
+                                              }))
+                                            }
+                                          />
+                                        ))}
+                                      </div>
+                                      <SaveCancel
+                                        busy={busy !== null}
+                                        dirty
+                                        onSave={() => savePending(u)}
+                                        onReset={() => {
+                                          setPendingGuild((s) => { const c = { ...s }; delete c[u.id]; return c; });
+                                          setPendingStaged((s) => { const c = { ...s }; delete c[u.id]; return c; });
+                                        }}
+                                      />
+                                    </div>
+                                  )
+                                )}
+                              </>
                             )}
                           </div>
                         )}
-                        <select
-                          value=""
-                          disabled={busy !== null}
-                          onChange={(e) => e.target.value && addOverride(u.id, e.target.value)}
-                          className="px-3 py-2 rounded-lg bg-card border border-border text-xs text-secondary"
-                        >
-                          <option value="">Override a specific server...</option>
-                          {guilds
-                            .filter((g) => !overridden.has(g.id))
-                            .map((g) => (
-                              <option key={g.id} value={g.id}>{g.name}</option>
-                            ))}
-                        </select>
                       </>
+                    )}
+
+                    {!u.seed && (
+                      <div className="mt-4 pt-3 border-t border-border flex items-center gap-2 flex-wrap">
+                        <span className="text-xs text-muted flex-1 min-w-40">
+                          Removing the account deletes its sessions and access
+                          requests; the user can log in again at any time.
+                        </span>
+                        {confirmDelete === u.id ? (
+                          <>
+                            <button
+                              onClick={() => deleteUser(u.id)}
+                              disabled={busy !== null}
+                              className="px-3 py-1 rounded-lg bg-red-500/90 text-inverse text-xs font-medium hover:bg-red-500 transition disabled:opacity-50"
+                            >
+                              Confirm remove
+                            </button>
+                            <button
+                              onClick={() => setConfirmDelete(null)}
+                              disabled={busy !== null}
+                              className="px-2 py-1 rounded-lg bg-card border border-border text-xs text-secondary hover:text-primary transition disabled:opacity-50"
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmDelete(u.id)}
+                            disabled={busy !== null}
+                            className="px-2 py-1 rounded-lg bg-card border border-border text-xs text-red-400 hover:text-red-300 transition disabled:opacity-40"
+                          >
+                            Remove account
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}

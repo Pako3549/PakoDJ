@@ -22,6 +22,7 @@ import time
 import json
 import secrets
 import hashlib
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Literal, Optional
 from urllib.parse import urlencode
@@ -59,7 +60,8 @@ class PermissionsRequest(BaseModel):
 
 
 class AccessRequestCreate(BaseModel):
-    guild_id: int
+    guild_id: Optional[int] = None
+    message: str = Field('', max_length=200)
     message: str = Field('', max_length=200)
 
 
@@ -78,6 +80,66 @@ DISCORD_ADMIN_IDS = {
 API_PUBLIC_ORIGIN = os.getenv('API_PUBLIC_ORIGIN', '').rstrip('/')
 
 _oauth_states = {}  # CSRF state -> expiry timestamp
+
+# The access panel refreshes the user's shared-guilds snapshot from Discord
+# using the stored OAuth pair (stored per login). The lock serializes rare
+# refreshes so two concurrent sessions of the same account never grind the
+# same refresh token; it also caps Discord API pressure.
+_snapshot_refresh_lock = asyncio.Lock()
+
+
+async def refresh_user_guilds_snapshot(user):
+    """Refresh users.guild_ids from Discord with the stored OAuth pair: this
+    is what keeps guild joins and leaves accurate without a new login.
+    Returns the fresh guild ID list, or None when nothing could be fetched
+    (no tokens, revoked/expired refresh, Discord hiccup) so the caller falls
+    back to the stored snapshot without failing the read."""
+    access = user.get('discord_access_token') or ''
+    refresh = user.get('discord_refresh_token') or ''
+    if not access and not refresh:
+        return None
+    expires_at = user.get('discord_token_expires')
+    import aiohttp  # provided by discord.py
+    async with _snapshot_refresh_lock:
+        async with aiohttp.ClientSession() as session:
+            needs_refresh = (
+                refresh and
+                expires_at is not None and
+                expires_at <= datetime.now(timezone.utc)
+            )
+            if needs_refresh:
+                resp = await session.post('https://discord.com/api/oauth2/token', data={
+                    'client_id': DISCORD_CLIENT_ID,
+                    'client_secret': DISCORD_CLIENT_SECRET,
+                    'grant_type': 'refresh_token',
+                    'refresh_token': refresh,
+                })
+                if resp.status != 200:
+                    return None
+                tokens = await resp.json()
+                access = tokens.get('access_token') or access
+                refresh = tokens.get('refresh_token') or refresh
+                await database.set_discord_oauth_tokens(
+                    user['id'], access, refresh,
+                    datetime.fromtimestamp(
+                        time.time() + int(tokens.get('expires_in', 0)), tz=timezone.utc
+                    ) if tokens.get('expires_in') else None
+                )
+            if not access:
+                return None
+            resp = await session.get(
+                'https://discord.com/api/users/@me/guilds',
+                headers={
+                    'Authorization': f"Bearer {access}",
+                    'User-Agent': 'PakoDJ Bot (https://github.com/Pako3549/PakoDJ)',
+                },
+            )
+            if resp.status != 200:
+                return None
+            user_guilds = await resp.json()
+        ids = [str(g.get('id')) for g in user_guilds if g.get('id')]
+    await database.set_user_guilds_snapshot(user['id'], json.dumps(ids))
+    return ids
 _search_cache: dict = {}  # metadata query -> (expiry timestamp, results), 5-minute TTL
 
 
@@ -260,11 +322,9 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
             resp = await session.get('https://discord.com/api/users/@me/guilds', headers=auth_headers)
             user_guilds = (await resp.json()) if resp.status == 200 else []
 
-        # Only members of a server the bot is in may log in
-        bot_guild_ids = {str(g.id) for g in bot.guilds}
-        if not any(str(g.get('id')) in bot_guild_ids for g in user_guilds):
-            raise HTTPException(status_code=403, detail="You must share a server with the bot")
-
+        # Login is open to any Discord account: no shared server is required.
+        # The API stays closed until an admin grants permissions; accounts
+        # that share no server with the bot can ask via the generic request.
         discord_id = str(me['id'])
         env_role = 'admin' if discord_id in DISCORD_ADMIN_IDS else 'nobody'
         user = await database.upsert_discord_user(
@@ -273,8 +333,18 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         # Snapshot the guilds shared between this user and the bot; the access
         # request flow (GET /api/access/guilds, POST /api/access-requests) reads it.
         user_guild_ids = {str(g.get('id')) for g in user_guilds}
-        shared = [str(g.id) for g in bot.guilds if str(g.id) in user_guild_ids]
-        await database.set_user_guilds_snapshot(user['id'], json.dumps(shared))
+        guild_snapshot = [str(g.id) for g in bot.guilds if str(g.id) in user_guild_ids]
+        await database.set_user_guilds_snapshot(user['id'], json.dumps(guild_snapshot))
+        # Keep the OAuth pair for the lazy snapshot refresh: the panel can
+        # re-check membership later (joins/leaves) without a new login.
+        expires_in = tokens.get('expires_in')
+        try:
+            await database.set_discord_oauth_tokens(
+                user['id'], tokens.get('access_token', ''), tokens.get('refresh_token', ''),
+                datetime.fromtimestamp(time.time() + int(expires_in), tz=timezone.utc) if expires_in else None
+            )
+        except (ValueError, TypeError):
+            print("WARNING: could not persist Discord OAuth tokens for the snapshot refresh")
         payload = await _new_session_payload(user)
         # Browsers get redirected to the webapp with the token in the URL
         # fragment (client-side only, never hits server logs); API clients
@@ -308,9 +378,20 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"status": "ok", "guilds": len(bot.guilds)}
 
     @app.get("/api/guilds")
-    async def guilds(user: dict = Depends(_require_permission('view'))):
-        # Discord snowflakes exceed JS number precision: always serialize as strings
-        return [{"id": str(g.id), "name": g.name} for g in bot.guilds]
+    async def guilds(user: dict = Depends(_require_account)):
+        # Visibility rule: global 'view' exposes every bot guild; accounts
+        # without it see only the guilds carrying a per-guild override with
+        # 'view' (that override is how single-server grants work: global set
+        # stays empty, view lives inside that one guild). Discord snowflakes
+        # exceed JS number precision: always serialize as strings.
+        if 'view' in database.parse_permissions(user.get('permissions')):
+            return [{"id": str(g.id), "name": g.name} for g in bot.guilds]
+        overrides = await database.list_user_guild_permissions(user['id'])
+        visible = {
+            o['guild_id'] for o in overrides
+            if 'view' in database.parse_permissions(o['permissions'])
+        }
+        return [{"id": str(g.id), "name": g.name} for g in bot.guilds if g.id in visible]
 
     @app.get("/api/guilds/{guild_id}/status")
     async def status(guild_id: int, user: dict = Depends(_require_permission('view'))):
@@ -398,6 +479,21 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
             raise HTTPException(status_code=404, detail="Unknown user")
         return dict(updated)
 
+    @app.delete("/api/users/{user_id}")
+    async def remove_user(user_id: int, admin: dict = Depends(_require_permission('manage_users'))):
+        # Login accepts any Discord account, so junk accounts can appear;
+        # admins need a removal tool. Seeded (env) admins are untouchable.
+        target = await database.get_user_by_id(user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Unknown user")
+        if target['seed']:
+            raise HTTPException(
+                status_code=403,
+                detail="Seeded admin account managed by DISCORD_ADMIN_IDS only"
+            )
+        await database.delete_discord_user(user_id)
+        return {"deleted": user_id}
+
     @app.put("/api/users/{user_id}/guilds/{guild_id}")
     async def set_guild_permissions(
         user_id: int, guild_id: int, body: PermissionsRequest,
@@ -430,10 +526,16 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
     # ------------------------------------------------------------------
     @app.get("/api/access/guilds")
     async def access_guilds(user: dict = Depends(_require_account)):
-        """Servers where BOTH the user and the bot are (snapshot from the last
-        login). A 'nobody' account uses this list to build its request."""
+        """Servers where BOTH the user and the bot are. The snapshot is
+        refreshed from Discord right here (stored OAuth pair), so joining or
+        leaving a server shows up without any re-login; on a Discord failure
+        the last stored snapshot is used, stale but real."""
         try:
-            snapshot = set(json.loads(user['guild_ids']))
+            live = await refresh_user_guilds_snapshot(user)
+        except Exception:
+            live = None
+        try:
+            snapshot = set(live) if live is not None else set(json.loads(user['guild_ids']))
         except (ValueError, TypeError):
             snapshot = set()
         return [
@@ -447,20 +549,64 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
 
     @app.post("/api/access-requests")
     async def request_access(body: AccessRequestCreate, user: dict = Depends(_require_account)):
-        # Only a shared guild may be requested, and only while the request
-        # is unanswered; duplicates are silently rejected.
-        try:
-            snapshot = set(json.loads(user['guild_ids']))
-        except (ValueError, TypeError):
-            snapshot = set()
-        if str(body.guild_id) not in snapshot:
-            raise HTTPException(status_code=400, detail="Not a guild shared between you and the bot")
-        guild_name = next((g.name for g in bot.guilds if g.id == body.guild_id), '')
-        request_id = await database.create_access_request(
-            user['id'], body.guild_id, guild_name, body.message.strip()
+        # Guild request: only a shared guild may be requested, one pending per
+        # guild. Generic request (no guild_id): allowed even sharing no server
+        # at all, one pending per user. Duplicates are rejected, not silently
+        # swallowed, so the web panel can show the "already pending" hint.
+        # Snapshot for the guild-request check: refreshed from Discord when
+        # possible (join/leave accuracy), last stored one on any failure.
+        # Generic requests skip the check entirely (one pending per user).
+        if body.guild_id is not None:
+            try:
+                live = await refresh_user_guilds_snapshot(user)
+            except Exception:
+                live = None
+            try:
+                snapshot = set(live) if live is not None else set(json.loads(user['guild_ids']))
+            except (ValueError, TypeError):
+                snapshot = set()
+            if str(body.guild_id) not in snapshot:
+                raise HTTPException(status_code=400, detail="Not a guild shared between you and the bot")
+            guild_name = next((g.name for g in bot.guilds if g.id == body.guild_id), '')
+            request_id = await database.create_access_request(
+                user['id'], body.guild_id, guild_name, body.message.strip()
+            )
+            if request_id is None:
+                raise HTTPException(status_code=409, detail="A pending request for this guild already exists")
+        else:
+            request_id = await database.create_access_request(
+                user['id'], None, '', body.message.strip()
+            )
+            if request_id is None:
+                raise HTTPException(status_code=409, detail="A generic request is already pending")
+
+        # Discord DM to every env admin, best effort (closed DMs or unknown
+        # ids must never fail the created request; the timeout bounds the
+        # latency of a slow Discord API). Seeded admins are exactly the env
+        # list, so DMing it reaches whoever owns the deployment.
+        label = (
+            f"requests access to the server {guild_name}"
+            if body.guild_id is not None
+            else "requests generic access to PakoDJ (no shared server)"
         )
-        if request_id is None:
-            raise HTTPException(status_code=409, detail="A pending request for this guild already exists")
+        text = f"{user['username']} {label}"
+        if body.message.strip():
+            text += f"\n\nMessage: {body.message.strip()}"
+        text += "\n\nOpen the web panel, Users page, to grant or deny."
+
+        async def _dm_admin(admin_id: str):
+            admin_user = bot.get_user(int(admin_id)) or await bot.fetch_user(int(admin_id))
+            if admin_user is not None:
+                await admin_user.send(text[:1900])
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(_dm_admin(a) for a in DISCORD_ADMIN_IDS), return_exceptions=True),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            pass  # notification only; the request row is already stored
+
         return {"created": True, "request_id": request_id}
 
     @app.patch("/api/access-requests/{request_id}")

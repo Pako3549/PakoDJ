@@ -130,7 +130,7 @@ The bot embeds an **HTTP API** (FastAPI) in its own process on port **8000**. It
 
 Sessions are stored server side (only their SHA-256), can be revoked by deleting the row or via `POST /api/auth/logout`. **When the API is exposed through Cloudflare, rate limiting is delegated to Cloudflare rules.**
 
-**Setup requirements:** set `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` and `API_PUBLIC_ORIGIN` (e.g. `https://api.yourdomain.com`) in `bot/.env`, and register the redirect URI `${API_PUBLIC_ORIGIN}/api/auth/discord/callback` in your Discord application (discord.com/developers → OAuth2). Users must share a server with the bot to log in. Discord IDs in `DISCORD_ADMIN_IDS=<id>,...` are always admin — put your own ID there and your account is the owner-admin from the first login. Until those env vars are set, the Discord endpoints answer `503` and every other endpoint answers `401` (no anonymous surface).
+**Setup requirements:** set `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` and `API_PUBLIC_ORIGIN` (e.g. `https://api.yourdomain.com`) in `bot/.env`, and register the redirect URI `${API_PUBLIC_ORIGIN}/api/auth/discord/callback` in your Discord application (discord.com/developers → OAuth2). Any Discord account can log in: the API stays closed until an admin grants permissions, and a stray account can at most hold one pending generic request (see below). Discord IDs in `DISCORD_ADMIN_IDS=<id>,...` are always admin — put your own ID there and your account is the owner-admin from the first login. Until those env vars are set, the Discord endpoints answer `503` and every other endpoint answers `401` (no anonymous surface).
 
 **Granular permissions:** every login auto-creates the account without API surface (empty permission set: only `/api/auth/me` and the access-request endpoints). Six permission keys, checked per endpoint: `view` (read endpoints), `search` (track metadata), `queue` (play/enqueue), `queue_manage` (remove/reorder/clear the queue), `playback` (pause/resume/skip/stop), `manage_users` (accounts + access requests). Users with `manage_users` manage the sets:
 - `GET /api/users` — list accounts (id, username, permissions, seed flag, created_at, discord_id)
@@ -142,9 +142,12 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 **Seeded admins are untouchable:** accounts whose Discord ID is in `DISCORD_ADMIN_IDS` carry the `seed` flag, always hold the full permission set, and are exclusively owned by the env — no API call and no other user can ever change or demote them (`403`). Removing an ID from `DISCORD_ADMIN_IDS` wipes that account's permissions at its next login. Granted permissions on normal accounts survive logins.
 
 **Access requests (webapp onboarding):** an account without `view` asks for access directly from the webapp:
-1. `GET /api/access/guilds` — servers where BOTH the user and the bot are (snapshot refreshed at every login)
-2. `POST /api/access-requests {"guild_id": ..., "message": "why I want access"}` — one pending request per guild, validated against that same list
-3. users with `manage_users` see the queue with `GET /api/access-requests` (username, guild, message) and resolve each one with `PATCH /api/access-requests/{id} {"status": "granted"|"denied"}` — granting the actual permission set is a separate `PATCH /api/users/{id}` call
+1. `GET /api/access/guilds` — servers where BOTH the user and the bot are; the shared-guilds snapshot is refreshed from Discord right on this read (stored user OAuth token, auto-refreshed on expiry), so joining or leaving a server shows up without logging in again; on any Discord failure the last stored snapshot answers (stale but real)
+2. `POST /api/access-requests {"guild_id": ..., "message": "why I want access"}` — one pending request per guild, validated against that same list; with no `guild_id` the request is **generic** (allowed even sharing no server with the bot, one pending per user, `guild_id: null` in the queue)
+3. users with `manage_users` see the queue with `GET /api/access-requests` (username, guild or `null`, message) and resolve each one with `PATCH /api/access-requests/{id} {"status": "granted"|"denied"}`; the grant itself is scoped: a **guild request** creates the per-guild override (`PUT /api/users/{id}/guilds/{guild_id}` with `["view"]`, the global set stays empty, the user sees only that server) while a **generic request** grants global `view` (`PATCH /api/users/{id}`). Every new request also sends a best-effort
+   Discord DM to each ID in `DISCORD_ADMIN_IDS` ("X requests access to the
+   server Y") so managers hear about it without watching the panel.
+4. accounts created by stray logins can be removed entirely with `DELETE /api/users/{id}` (seeded admins are protected)
 
 **Local webapp panel (development):** the root `compose.yml` also runs the web panel (React + Vite, `web/`) behind **nginx**, the only published port of the platform: open `http://localhost:8080` and the UI talks to the API through the same origin (`/api/*` proxy, no CORS). Production exposure remains Cloudflare-only.
 
@@ -161,13 +164,14 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `GET` | `/api/users` | `manage_users` | List accounts and their permissions |
 | `GET` | `/api/users/{id}` | `manage_users` | One account with its per-guild overrides |
 | `PATCH` | `/api/users/{id}` | `manage_users` | Replace the global permission set |
+| `DELETE` | `/api/users/{id}` | `manage_users` | Remove a non-seed account (its sessions/requests/overrides are deleted with it) |
 | `PUT` | `/api/users/{id}/guilds/{guild_id}` | `manage_users` | Set the per-guild permission override |
 | `DELETE` | `/api/users/{id}/guilds/{guild_id}` | `manage_users` | Drop the per-guild override |
 | `GET` | `/api/access/guilds` | session | Guilds shared between the account and the bot |
 | `GET` | `/api/access-requests` | `manage_users` | Pending access requests (panel queue) |
-| `POST` | `/api/access-requests` | session | Submit an access request for a shared guild |
+| `POST` | `/api/access-requests` | session | Submit an access request for a shared guild, or a generic one (`guild_id` omitted) |
 | `PATCH` | `/api/access-requests/{id}` | `manage_users` | Resolve a request (`granted`/`denied`) |
-| `GET` | `/api/guilds` | `view` | Servers the bot is in |
+| `GET` | `/api/guilds` | session | Servers the bot is in, filtered by what the account may see: global `view` = all, otherwise only the guilds carrying a per-guild `view` override |
 | `GET` | `/api/guilds/{id}/status` | `view` | Now playing + queue count + voice state |
 | `GET` | `/api/now-playing` | `view` | What every connected server is playing |
 | `GET` | `/api/guilds/{id}/queue` | `view` | Queue of a server |

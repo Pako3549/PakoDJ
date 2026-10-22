@@ -21,9 +21,11 @@ export default function DashboardPage() {
   const [statuses, setStatuses] = useState<Statuses | null>(() => readCache<Statuses>("pakodj:guild-statuses", 20_000));
 
   useEffect(() => {
-    // Accounts without the view permission never read guild data; they get
-    // the access-request onboarding screen instead (nothing to fetch).
-    if (!account?.permissions.includes("view")) return;
+    // The guilds list is server-side filtered by what the account may see
+    // (global view = all; otherwise only guilds with a per-guild override),
+    // so every account fetches it: an empty answer means the onboarding
+    // screen has content to request against.
+    if (!account) return;
     let alive = true;
     apiFetch<Guild[]>("/api/guilds")
       .then(async (gs) => {
@@ -49,7 +51,16 @@ export default function DashboardPage() {
   }, [account]);
 
   if (loading || !account) return error ? <ErrorBox message={error} /> : null;
-  if (!account.permissions.includes("view")) return <RequestAccessPanel account={account} />;
+  // Onboarding only when the account really sees nothing: no global view
+  // AND an (already loaded) empty guild list. A scoped grant (per-guild
+  // override) gives a non-empty list, so the dashboard shows it directly.
+  if (
+    !account.permissions.includes("view") &&
+    guilds !== null &&
+    guilds.length === 0
+  ) {
+    return <RequestAccessPanel account={account} />;
+  }
 
   const playing = statuses
     ? Object.values(statuses).filter((s) => s?.playing).length
