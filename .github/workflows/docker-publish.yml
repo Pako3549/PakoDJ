@@ -93,6 +93,12 @@ jobs:
 
     - name: Prepare config files
       run: |
+        # A past failed nginx mount can leave an empty directory where
+        # nginx/prod.conf belongs; restore the real file from the checkout.
+        if [ ! -f nginx/prod.conf ]; then
+          rm -rf nginx
+          git checkout HEAD -- nginx
+        fi
         mkdir -p bot logs
         cat > bot/.env <<EOF
         token=${{ secrets.DISCORD_TOKEN }}
