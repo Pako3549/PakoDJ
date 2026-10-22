@@ -1,7 +1,16 @@
+# Secrets: never commit (bot/.env holds the real tokens; workflow writes its own).
 .env
-logs
-.cache
-web/node_modules
-web/.next
-web/next-env.d.ts
+
+# Runtime logs and local caches
+logs/
+.cache/
+
+# Node dependencies anywhere (dev, web, tooling)
+node_modules/
+
+# Web build outputs and compile caches
+web/dist/
 web/*.tsbuildinfo
+
+# Bot bytecode
+bot/__pycache__/

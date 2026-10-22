@@ -110,30 +110,34 @@ in-app rate limiting** — a public deployment sits behind Cloudflare rules.
   profile lives only in the two deploy compose files — the dev compose has no
   cloudflared service at all.
 
-## Webapp architecture (Next.js + TypeScript + React + nginx)
+## Webapp architecture (React + Vite + TypeScript + nginx)
 
 ```
  browser
     │  http://localhost:8080  (dev; prod: yourhostname via Cloudflare Tunnel)
     ▼
   nginx ── one origin for everything:
-    ├── /                     → web (Next.js dev / prod server)
-    ├── /_next/*              → web
+    ├── /                     → web (Vite dev server / static build)
     └── /api/*                → pakodj(-dev):8000  (bot FastAPI, unpublished)
 ```
 
-- **Framework:** Next.js App Router (TypeScript, `strict`), React 19.
+- **Framework:** React 19 + Vite + react-router (TypeScript, `strict`).
+  The panel is a fully client-side SPA: no SSR, no server runtime of its own,
+  and the OAuth token never leaves the browser (localStorage).
 - **nginx is the single entry point**, in DEV and in production. Same-origin
   `/api` calls mean the backend needs **no CORS at all** for the webapp;
   `API_CORS_ORIGINS` stays free for third-party tools.
-- **DEV (`compose.yml`):** `web` runs `npm run dev` with the source mounted
-  (hot reload) and a dedicated `web-node-modules` volume; nginx publishes
-  `8080:80` — the only published port in the whole platform, dev only.
-- **Production (planned wiring):** CI builds a `web` image (`next build`
-  standalone output; `web/Dockerfile` already set for it), the deploy compose
-  runs `web` + `nginx` (no ports) and Cloudflare Tunnel maps the public
-  hostname (planned: `https://dj.pako.uk`) to `nginx:80`. The FastAPI port
-  stays unpublished in production, exactly as now.
+- **DEV (`compose.yml`):** `web` runs `npm run dev` (Vite, hot reload) with
+  the source mounted; nginx publishes `8080:80` — the only published port in
+  the whole platform, dev only.
+- **Production (actual wiring):** CI pushes two GHCR images: `pakodj` (bot +
+  API, root `Dockerfile`) and `pakodj-web` (static build — `web/Dockerfile`
+  `target: prod`, an internal nginx serving `dist/` with SPA fallback).
+  Both deploy composes run `pakodj` + `db` + `web` + `nginx` (+ `cloudflared`
+  under the `tunnel` profile) with **no published ports**; the Tunnel maps
+  the public hostname (planned: `https://dj.pako.uk`) to `nginx:80`, so the
+  panel and the API share one origin in production too. `nginx/prod.conf`
+  mirrors `nginx/dev.conf` with the production service names.
 - **Auth flow stays the one defined in `permissions.md`/architecture:** the
   frontend opens `/api/auth/discord/start` (through nginx, same origin),
   stores the session token, and `/api/auth/me` gates the UI (role → buttons).
@@ -145,8 +149,8 @@ in-app rate limiting** — a public deployment sits behind Cloudflare rules.
 - Browser clients: set `API_CORS_ORIGINS` to the webapp origin; server-side
   clients need nothing.
 - `/api/auth/discord/start` returns the authorize URL the frontend opens;
-  the callback returns the session token as JSON (the frontend decides
-  redirects later).
+  the callback redirects browsers to the panel (token in the URL fragment);
+  `?json=1` keeps the raw JSON payload for API clients.
 - `/api/auth/me` returns `id/username/role` so the UI can gate buttons.
 - `/api/now-playing` exists for a global "what is playing everywhere" view.
 

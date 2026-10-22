@@ -125,7 +125,7 @@ The bot embeds an **HTTP API** (FastAPI) in its own process on port **8000**. It
 
 **Every endpoint requires a login session, and the only login method is Discord OAuth:**
 1. `GET /api/auth/discord/start` → returns the Discord authorize URL (open it, approve).
-2. Discord redirects back to `GET /api/auth/discord/callback?code=...&state=...` → the account (linked to the Discord user) is created and a `session_token` is returned (expires after `API_SESSION_TTL_DAYS`, default 7).
+2. Discord redirects back to `GET /api/auth/discord/callback?code=...&state=...` → the account (linked to the Discord user) is created and the **browser is redirected to the panel** (`/auth/callback`, session data travels in the URL fragment so it never hits server logs). API clients that want the raw JSON add `?json=1`.
 3. Every other call needs the header `Authorization: Bearer <session_token>`.
 
 Sessions are stored server side (only their SHA-256), can be revoked by deleting the row or via `POST /api/auth/logout`. **When the API is exposed through Cloudflare, rate limiting is delegated to Cloudflare rules.**
@@ -143,7 +143,11 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 2. `POST /api/access-requests {"guild_id": ..., "message": "why I want access"}` — one pending request per guild, validated against that same list
 3. admins see the queue with `GET /api/access-requests` (username, guild, message) and resolve each one with `PATCH /api/access-requests/{id} {"status": "granted"|"denied"}` — granting the actual role is a separate `PATCH /api/users/{id}` call
 
-**No ports are published**: the API is reachable only from the Docker network (`http://pakodj:8000`). To expose it to the internet, the recommended path is **Cloudflare Tunnel** — see the next section. If you ever publish a port directly, bind it to localhost only (`127.0.0.1:8000:8000`, commented block in the compose files) and keep the public caller behind a reverse proxy.
+**Local webapp panel (development):** the root `compose.yml` also runs the web panel (React + Vite, `web/`) behind **nginx**, the only published port of the platform: open `http://localhost:8080` and the UI talks to the API through the same origin (`/api/*` proxy, no CORS). Production exposure remains Cloudflare-only.
+
+**No ports are published** in the production compose files: the API is reachable only from the Docker network (`http://pakodj:8000`) and the web panel is served internally by nginx. To expose the platform to the internet, the recommended path is **Cloudflare Tunnel** — see the next section. If you ever publish a port directly, bind it to localhost only (`127.0.0.1:8000:8000`, commented block in the compose files) and keep the public caller behind a reverse proxy.
+
+**Production stack layout (both deploy composes):** `pakodj` (bot + API), `web` (static React/Vite build served by an internal nginx), `nginx` (single entry point: `/` → web, `/api/*` → pakodj), optional `cloudflared` under the `tunnel` profile. Point the Tunnel hostname at `http://nginx:80` in the Cloudflare dashboard and the whole platform (panel + API) is live with zero published ports.
 
 | Method | Endpoint | Auth | Description |
 | ------ | -------- | ---- | ----------- |
@@ -161,6 +165,11 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `GET` | `/api/guilds/{id}/status` | viewer+ | Now playing + queue count + voice state |
 | `GET` | `/api/now-playing` | viewer+ | What every connected server is playing |
 | `GET` | `/api/guilds/{id}/queue` | viewer+ | Queue of a server |
+| `GET` | `/api/search?q=` | viewer+ | Track metadata (free Deezer public API, server-cached) |
+| `POST` | `/api/guilds/{id}/queue` | 🛠️ admin | `{ "query": "...", "position": 0? }` — enqueue (append or at a position) |
+| `PATCH` | `/api/guilds/{id}/queue/{item_id}` | 🛠️ admin | `{ "position": n }` — reorder the queue |
+| `DELETE` | `/api/guilds/{id}/queue/{item_id}` | 🛠️ admin | Remove one queued item |
+| `DELETE` | `/api/guilds/{id}/queue` | 🛠️ admin | Clear the queue |
 | `GET` | `/api/guilds/{id}/history` | viewer+ | History of a server |
 | `POST` | `/api/guilds/{id}/play` | 🛠️ admin | `{ "query": "..." }` — play or enqueue |
 | `POST` | `/api/guilds/{id}/skip` | 🛠️ admin | `{ "all": false }` — skip / skip all |
@@ -176,6 +185,10 @@ When you put a web page in front of the API via Cloudflare Tunnel, **nothing in 
 - **Stop the bot**: `docker-compose -f deploy/compose.yml down`
 - **Restart the bot**: `docker-compose -f deploy/compose.yml restart pakodj`
 - **Update image**: `docker-compose -f deploy/compose.yml pull && docker-compose -f deploy/compose.yml up -d`
+
+Web panel on production: `web` is a static build served inside the stack and
+fronted by `nginx`; image updates land with the same `pull && up -d` command
+above. Logs for the webserver: `logs -f nginx`.
 
 #### For Local Build (Alternative):
 - **View logs**: `docker-compose -f deploy/compose.build.yml logs -f pakodj`

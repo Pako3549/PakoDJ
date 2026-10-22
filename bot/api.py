@@ -39,6 +39,15 @@ class PlayRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
 
 
+class QueueEnqueueRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    position: Optional[int] = Field(None, ge=0)
+
+
+class QueueMoveRequest(BaseModel):
+    position: int = Field(ge=0)
+
+
 class SkipRequest(BaseModel):
     all: bool = False
 
@@ -67,6 +76,18 @@ DISCORD_ADMIN_IDS = {
 API_PUBLIC_ORIGIN = os.getenv('API_PUBLIC_ORIGIN', '').rstrip('/')
 
 _oauth_states = {}  # CSRF state -> expiry timestamp
+_search_cache: dict = {}  # metadata query -> (expiry timestamp, results), 5-minute TTL
+
+
+def _row_dict(row):
+    """Record mapping with Discord snowflake fields as strings, so the JSON
+    survives JavaScript precision (snowflakes exceed Number.MAX_SAFE_INTEGER)."""
+    data = dict(row)
+    for key in ("guild_id", "user_id", "requester_id", "channel_id"):
+        value = data.get(key)
+        if isinstance(value, int):
+            data[key] = str(value)
+    return data
 
 
 def discord_login_configured() -> bool:
@@ -230,7 +251,22 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         user_guild_ids = {str(g.get('id')) for g in user_guilds}
         shared = [str(g.id) for g in bot.guilds if str(g.id) in user_guild_ids]
         await database.set_user_guilds_snapshot(user['id'], json.dumps(shared))
-        return await _new_session_payload(user)
+        payload = await _new_session_payload(user)
+        # Browsers get redirected to the webapp with the token in the URL
+        # fragment (client-side only, never hits server logs); API clients
+        # that explicitly ask for JSON still get the raw payload.
+        if request.query_params.get('json') != '1':
+            from fastapi.responses import RedirectResponse
+            fragment = urlencode({
+                'session_token': payload['session_token'],
+                'username': payload['username'],
+                'role': payload['role'],
+            })
+            return RedirectResponse(
+                url=f"/auth/callback#{fragment}",
+                status_code=303
+            )
+        return payload
 
     def get_guild(guild_id: int):
         guild = bot.get_guild(guild_id)
@@ -250,7 +286,8 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
 
     @app.get("/api/guilds")
     async def guilds(user: dict = Depends(_require_viewer)):
-        return [{"id": g.id, "name": g.name} for g in bot.guilds]
+        # Discord snowflakes exceed JS number precision: always serialize as strings
+        return [{"id": str(g.id), "name": g.name} for g in bot.guilds]
 
     @app.get("/api/guilds/{guild_id}/status")
     async def status(guild_id: int, user: dict = Depends(_require_viewer)):
@@ -259,11 +296,11 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         now = await database.list_now_playing()
         row = next((r for r in now if r['guild_id'] == guild_id), None)
         return {
-            "guild_id": guild_id,
+            "guild_id": str(guild_id),
             "voice_connected": bool(vc and vc.is_connected()),
             "playing": bool(vc and vc.is_playing()),
             "paused": bool(vc and vc.is_paused()),
-            "now_playing": dict(row) if row else None,
+            "now_playing": _row_dict(row) if row else None,
             "queue_count": await database.count_queue(guild_id),
             "loading_in_background": bool(get_server_info(guild_id).get('loading_task')),
         }
@@ -275,18 +312,18 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
     async def queue(guild_id: int, user: dict = Depends(_require_viewer)):
         get_guild(guild_id)
         rows = await database.list_queue(guild_id, limit=200)
-        return [dict(r) for r in rows]
+        return [_row_dict(r) for r in rows]
 
     @app.get("/api/guilds/{guild_id}/history")
     async def history(guild_id: int, user: dict = Depends(_require_viewer)):
         get_guild(guild_id)
         rows = await database.list_history(guild_id, limit=100)
-        return [dict(r) for r in rows]
+        return [_row_dict(r) for r in rows]
 
     @app.get("/api/now-playing")
     async def now_playing(user: dict = Depends(_require_viewer)):
         rows = await database.list_now_playing()
-        return [dict(r) for r in rows]
+        return [_row_dict(r) for r in rows]
 
     # ------------------------------------------------------------------
     # User management (admin: grant webapp access after first Discord login)
@@ -325,13 +362,13 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         except (ValueError, TypeError):
             snapshot = set()
         return [
-            {"id": g.id, "name": g.name} for g in bot.guilds if str(g.id) in snapshot
+            {"id": str(g.id), "name": g.name} for g in bot.guilds if str(g.id) in snapshot
         ]
 
     @app.get("/api/access-requests")
     async def access_requests(admin: dict = Depends(_require_admin)):
         rows = await database.list_access_requests()
-        return [dict(r) for r in rows]
+        return [_row_dict(r) for r in rows]
 
     @app.post("/api/access-requests")
     async def request_access(body: AccessRequestCreate, user: dict = Depends(_require_account)):
@@ -438,5 +475,86 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         if not played:
             raise HTTPException(status_code=500, detail="Playback failed")
         return {"playing": True, "title": title}
+
+    @app.post("/api/guilds/{guild_id}/queue")
+    async def enqueue_at(guild_id: int, body: QueueEnqueueRequest, admin: dict = Depends(_require_admin)):
+        guild = get_guild(guild_id)
+        get_voice(guild)  # 409 if the bot is not connected
+        stream_url, title, video_url, headers = await resolve_audio_info_async(body.query)
+        if stream_url is None:
+            raise HTTPException(status_code=400, detail="Unable to retrieve audio info")
+        if body.position is None:
+            row_id = await database.enqueue_track(
+                guild_id=guild_id, title=title, webpage_url=video_url,
+                search_query=body.query
+            )
+        else:
+            queued = await database.count_queue(guild_id)
+            if body.position > queued:
+                raise HTTPException(status_code=400, detail="Position beyond the queue length")
+            row_id = await database.insert_track_at_position(
+                guild_id, body.position, title=title, webpage_url=video_url,
+                search_query=body.query
+            )
+        return {"queued": True, "row_id": row_id, "title": title}
+
+    @app.patch("/api/guilds/{guild_id}/queue/{item_id}")
+    async def move_queued(guild_id: int, item_id: int, body: QueueMoveRequest, admin: dict = Depends(_require_admin)):
+        get_guild(guild_id)
+        moved = await database.move_queue_item(guild_id, item_id, body.position)
+        if moved is None:
+            raise HTTPException(status_code=404, detail="Queued item not found")
+        return dict(moved)
+
+    @app.delete("/api/guilds/{guild_id}/queue/{item_id}")
+    async def remove_queued(guild_id: int, item_id: int, admin: dict = Depends(_require_admin)):
+        get_guild(guild_id)
+        removed = await database.delete_queue_item(guild_id, item_id)
+        if removed is None:
+            raise HTTPException(status_code=404, detail="Queued item not found")
+        return {"removed": True, "title": removed['title']}
+
+    @app.delete("/api/guilds/{guild_id}/queue")
+    async def clear_pendings(guild_id: int, admin: dict = Depends(_require_admin)):
+        get_guild(guild_id)
+        await database.clear_queue(guild_id)
+        return {"cleared": True}
+
+    @app.get("/api/search")
+    async def search(q: str, user: dict = Depends(_require_account)):
+        """Thin proxy for the free Deezer public metadata API (docs/meta layer:
+        no playback role): title/artist/cover/preview to power the webapp list;
+        picking a result just becomes a normal play/queue request."""
+        q = q.strip()[:200]
+        if not q:
+            raise HTTPException(status_code=400, detail="Empty query")
+        cached = _search_cache.get(q)
+        now_ts = time.time()
+        for key, (exp, _) in list(_search_cache.items()):
+            if exp < now_ts:
+                _search_cache.pop(key, None)
+        if cached and cached[0] > now_ts:
+            return cached[1]
+
+        import aiohttp  # provided by discord.py
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://api.deezer.com/search/track', params={'q': q, 'limit': 12}) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail="Metadata provider unavailable")
+                raw = await resp.json()
+        results = [
+            {
+                "id": item.get('id'),
+                "title": item.get('title'),
+                "artist": (item.get('artist') or {}).get('name'),
+                "album": (item.get('album') or {}).get('title'),
+                "cover": ((item.get('album') or {}).get('cover_medium')),
+                "preview": item.get('preview'),
+                "duration": item.get('duration'),
+            }
+            for item in (raw.get('data') or []) if item.get('id') is not None
+        ]
+        _search_cache[q] = (now_ts + 300, results)
+        return results
 
     return app

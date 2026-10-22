@@ -24,15 +24,20 @@ services:
       - ./bot:/app
       - ./logs:/app/logs
 
-  # Webapp (Next.js + TypeScript + React): dev with hot reload on source mounts.
+  # Webapp (React + Vite + TypeScript): dev with hot reload on source mounts.
   web:
-    build: ./web
+    build:
+      context: ./web
+      target: dev
     container_name: pakodj-web-dev
     restart: "no"
     depends_on:
       - pakodj-dev
     volumes:
       - ./web:/app
+      # Named volume so a fresh clone works out of the box: the first run
+      # seeds it from the image's npm ci output (host node_modules can't
+      # shadow what the bind mount would otherwise expose).
       - web-node-modules:/app/node_modules
 
   # Webserver in front of everything; the ONLY port published (dev only).
@@ -48,8 +53,8 @@ services:
       - ./nginx/dev.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       # Development exposure, as requested: nginx is the single entry point
-      # (web UI, /_next, and the /api proxy). Production publishes nothing
-      # and sits behind Cloudflare Tunnel instead.
+      # (web UI, Vite assets/HMR, and the /api proxy). Production publishes
+      # nothing and sits behind Cloudflare Tunnel instead.
       - "8080:80"
 
   db:

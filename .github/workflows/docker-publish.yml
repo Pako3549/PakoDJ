@@ -10,6 +10,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  WEB_IMAGE_NAME: ${{ github.repository }}-web
 
 jobs:
   build:
@@ -44,7 +45,7 @@ jobs:
           type=semver,pattern={{major}}.{{minor}}
           type=raw,value=latest,enable={{is_default_branch}}
 
-    - name: Build and push Docker image
+    - name: Build and push bot Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -52,6 +53,30 @@ jobs:
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Extract metadata (web)
+      id: meta_web
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.WEB_IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push web Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: web
+        target: prod
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta_web.outputs.tags }}
+        labels: ${{ steps.meta_web.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
@@ -90,7 +115,7 @@ jobs:
           echo "TUNNEL_TOKEN=${{ secrets.TUNNEL_TOKEN }}" >> .env
         fi
 
-    - name: Pull and start container
+    - name: Pull and start containers
       run: |
-        docker compose -f deploy/compose.yml pull pakodj
+        docker compose -f deploy/compose.yml pull
         docker compose -f deploy/compose.yml up -d --remove-orphans

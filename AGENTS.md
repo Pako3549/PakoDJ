@@ -70,12 +70,12 @@ end users.
 | `bot/.env.example` | Fully commented template of every runtime variable |
 | `bot/requirements.txt` | python-dotenv, discord.py[voice], PyNaCl, davey, yt-dlp@master, spotipy, asyncpg, fastapi, uvicorn |
 | `compose.yml` | Dev stack (pakodj-dev + web + nginx on 8080 + db; no tunnel service) |
-| `deploy/compose.yml` | Production stack pulled from GHCR |
+| `deploy/compose.yml` | Production stack pulled from GHCR (bot + web + nginx, no ports, `tunnel` profile) |
 | `deploy/compose.build.yml` | Production stack built on the host |
-| `.github/workflows/docker-publish.yml` | Build (multi-arch GHCR) + deploy to the Pi (rewrites `bot/.env` from secrets) |
+| `.github/workflows/docker-publish.yml` | Build (multi-arch GHCR: bot + web images) + deploy to the Pi (rewrites `bot/.env` from secrets) |
 | `runner/compose.yml` | Self-hosted GitHub Actions runner stack |
-| `web/` | Webapp: Next.js + TypeScript + React panel (dev: hot reload, served through nginx) |
-| `nginx/` | Webserver configs: `dev.conf` proxies `/` to the Next dev server and `/api/*` to the bot API (one origin) |
+| `web/` | Webapp: React + Vite + TypeScript panel (dev: Vite hot reload target; prod target: static build served by an internal nginx) |
+| `nginx/` | Webserver configs: one origin for everything — `dev.conf` (dev stack) routes `/` to web + `/api/*` to the bot; `prod.conf` routes to the deploy-stack service names, the Tunnel target |
 | `docs/` | Agent documentation (architecture, permission model, GUI style for the web frontend) |
 
 ## Environment variables
@@ -92,14 +92,12 @@ that reason). If you add a variable, update all three places: code,
 ## Verification checklist (run before claiming done)
 
 ```bash
-python3 -m py_compile bot/*.py
-printf 'token=x\n' > bot/.env                       # placeholder for compose validation
-docker compose -f compose.yml config -q
-docker compose -f deploy/compose.yml config -q
-docker compose -f deploy/compose.build.yml config -q
-rm bot/.env
-python3 -c "import yaml; yaml.safe_load(open('.github/workflows/docker-publish.yml'))"
+bash scripts/validate.sh
 ```
+
+An existing `bot/.env` belongs to the user and may contain real secrets:
+never overwrite, never delete, never print its contents. `scripts/validate.sh`
+is the only sanctioned way to touch it transiently for compose validation.
 
 All green + README/env.example updated = done. Runtime smoke tests need the
 user's real token: hand them the step list, do not fake "tested" results.

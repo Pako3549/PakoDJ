@@ -29,6 +29,27 @@ services:
     # ports:
     #   - "127.0.0.1:8000:8000"
 
+  # Web panel: static Vite build served by an internal nginx (web:80).
+  # No ports published: the outer nginx below is the single entry point.
+  web:
+    image: ghcr.io/pako3549/pakodj-web:latest
+    container_name: pakodj-web
+    restart: unless-stopped
+    depends_on:
+      - pakodj
+
+  # Single entry point for the panel (web) and the API (/api/* proxy) with no
+  # published ports: point the Cloudflare Tunnel hostname at http://nginx:80.
+  nginx:
+    image: nginx:stable-alpine
+    container_name: pakodj-nginx
+    restart: unless-stopped
+    depends_on:
+      - web
+      - pakodj
+    volumes:
+      - ../nginx/prod.conf:/etc/nginx/conf.d/default.conf:ro
+
   db:
     image: postgres:17-alpine
     container_name: pakodj-db
@@ -49,7 +70,7 @@ services:
   # WITHOUT publishing any port (cloudflared connects outbound to CF edge).
   # Enable with: docker compose --profile tunnel up -d
   # Put TUNNEL_TOKEN in bot/.env (Cloudflare Zero Trust > Networks > Tunnels),
-  # then map the public hostname to service http://pakodj:8000 in the dashboard.
+  # then map the public hostname to service http://nginx:80 in the dashboard.
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: pakodj-tunnel
@@ -59,7 +80,7 @@ services:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
     command: tunnel --no-autoupdate run
     depends_on:
-      - pakodj
+      - nginx
 
 networks:
   default:

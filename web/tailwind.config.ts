@@ -3,7 +3,7 @@ import type { Config } from "tailwindcss";
 
 const config: Config = {
   darkMode: "class",
-  content: ["./app/**/*.{ts,tsx}", "./src/**/*.{ts,tsx}"],
+  content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
@@ -16,9 +16,6 @@ const config: Config = {
         secondary: "var(--color-text-secondary)",
         muted: "var(--color-text-muted)",
         inverse: "var(--color-text-inverse)",
-      },
-      transitionProperty: {
-        theme: ["background-color", "color"],
       },
     },
   },

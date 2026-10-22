@@ -23,9 +23,14 @@ CREATE TABLE IF NOT EXISTS queue_items (
     collection_type TEXT,
     requester_id    BIGINT,
     channel_id      BIGINT,
+    position        BIGINT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_queue_guild ON queue_items (guild_id, id);
+-- position powers queue reordering (web panel); NULL rows are legacy rows
+-- already stored before the column existed.
+ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS position BIGINT;
+UPDATE queue_items SET position = id WHERE position IS NULL;
+CREATE INDEX IF NOT EXISTS idx_queue_guild ON queue_items (guild_id, position);
 CREATE INDEX IF NOT EXISTS idx_queue_collection ON queue_items (guild_id, collection_id);
 
 CREATE TABLE IF NOT EXISTS history (
@@ -109,14 +114,21 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON api_sessions (expires_at);
 
 INSERT_TRACK = """
 INSERT INTO queue_items
-    (guild_id, title, webpage_url, search_query, collection_id, collection_type, requester_id, channel_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    (guild_id, title, webpage_url, search_query, collection_id, collection_type, requester_id, channel_id, position)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE((SELECT max(position) FROM queue_items WHERE guild_id = $1), 0) + 1)
+RETURNING id
+"""
+
+INSERT_TRACK_AT_POSITION = """
+INSERT INTO queue_items
+    (guild_id, title, webpage_url, search_query, collection_id, collection_type, requester_id, channel_id, position)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING id
 """
 
 CLAIM_NEXT = """
 DELETE FROM queue_items
-WHERE id = (SELECT id FROM queue_items WHERE guild_id = $1 ORDER BY id LIMIT 1)
+WHERE id = (SELECT id FROM queue_items WHERE guild_id = $1 ORDER BY position, id LIMIT 1)
 RETURNING *
 """
 
@@ -160,13 +172,89 @@ async def enqueue_track(guild_id, title, webpage_url, search_query=None,
 
 
 async def claim_next_track(guild_id):
-    """FIFO: atomically remove and return the oldest queued row, or None.
-
-    Returned row: id, title, webpage_url, search_query,
-    collection_id, collection_type, requester_id, channel_id.
-    """
+    """FIFO on positions: atomically remove and return the next queued row."""
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetchrow(CLAIM_NEXT, guild_id)
+
+
+async def get_queue_item(guild_id, item_id):
+    """Fetch one queued row of a guild (does not remove it)."""
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM queue_items WHERE guild_id = $1 AND id = $2",
+            guild_id, item_id
+        )
+
+
+async def insert_track_at_position(guild_id, position, title, webpage_url,
+                                   search_query=None, collection_id=None,
+                                   collection_type=None, requester_id=None,
+                                   channel_id=None):
+    """Insert a track at a 0-based position, shifting later rows down;
+    returns the queue row id."""
+    async with _pool_or_raise().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE queue_items SET position = position + 1 "
+                "WHERE guild_id = $1 AND position >= $2",
+                guild_id, position
+            )
+            return await conn.fetchval(
+                INSERT_TRACK_AT_POSITION, guild_id, title, webpage_url,
+                search_query, collection_id, collection_type,
+                requester_id, channel_id, position
+            )
+
+
+async def move_queue_item(guild_id, item_id, position):
+    """Change a queued row's position and renumber its neighbours;
+    returns the moved row or None if the guild/item pair is unknown."""
+    async with _pool_or_raise().acquire() as conn:
+        async with conn.transaction():
+            item = await conn.fetchrow(
+                "SELECT id, position FROM queue_items WHERE guild_id = $1 AND id = $2",
+                guild_id, item_id
+            )
+            if item is None:
+                return None
+            old = item['position']
+            if position == old:
+                return item
+            if position < old:
+                await conn.execute(
+                    "UPDATE queue_items SET position = position + 1 "
+                    "WHERE guild_id = $1 AND position >= $2 AND position < $3",
+                    guild_id, position, old
+                )
+            else:
+                await conn.execute(
+                    "UPDATE queue_items SET position = position - 1 "
+                    "WHERE guild_id = $1 AND position > $2 AND position <= $3",
+                    guild_id, old, position
+                )
+            return await conn.fetchrow(
+                "UPDATE queue_items SET position = $3 "
+                "WHERE guild_id = $1 AND id = $2 "
+                "RETURNING id, title, position",
+                guild_id, item_id, position
+            )
+
+
+async def delete_queue_item(guild_id, item_id):
+    """Remove one queued row and close the gap; returns the deleted row."""
+    async with _pool_or_raise().acquire() as conn:
+        async with conn.transaction():
+            item = await conn.fetchrow(
+                "DELETE FROM queue_items WHERE guild_id = $1 AND id = $2 RETURNING *",
+                guild_id, item_id
+            )
+            if item is not None:
+                await conn.execute(
+                    "UPDATE queue_items SET position = position - 1 "
+                    "WHERE guild_id = $1 AND position > $2",
+                    guild_id, item['position']
+                )
+            return item
 
 
 async def clear_collection(guild_id, collection_id):
@@ -196,7 +284,7 @@ async def count_queue(guild_id):
 async def list_queue(guild_id, limit=50):
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetch(
-            "SELECT * FROM queue_items WHERE guild_id = $1 ORDER BY id LIMIT $2",
+            "SELECT * FROM queue_items WHERE guild_id = $1 ORDER BY position, id LIMIT $2",
             guild_id, limit
         )
 
