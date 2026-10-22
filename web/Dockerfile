@@ -12,7 +12,11 @@ COPY . .
 EXPOSE 3000
 CMD ["npm", "run", "dev"]
 
-FROM node:22-alpine AS build
+# The build stage always runs on the runner architecture: JS artifacts are
+# arch-independent, so emulating the target platform buys nothing and costs
+# everything (QEMU slowness + "Illegal instruction" crashes under npm).
+# The dist is then copied unchanged into every prod platform stage.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
