@@ -147,7 +147,7 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 
 **No ports are published** in the production compose files: the API is reachable only from the Docker network (`http://pakodj:8000`) and the web panel is served internally by nginx. To expose the platform to the internet, the recommended path is **Cloudflare Tunnel** — see the next section. If you ever publish a port directly, bind it to localhost only (`127.0.0.1:8000:8000`, commented block in the compose files) and keep the public caller behind a reverse proxy.
 
-**Production stack layout (both deploy composes):** `pakodj` (bot + API), `web` (static React/Vite build served by an internal nginx), `nginx` (single entry point: `/` → web, `/api/*` → pakodj), optional `cloudflared` under the `tunnel` profile. Point the Tunnel hostname at `http://nginx:80` in the Cloudflare dashboard and the whole platform (panel + API) is live with zero published ports.
+**Production stack layout (both deploy composes):** `pakodj` (bot + API), `web` (static React/Vite build served by an internal nginx), `nginx` (single entry point with the config baked into the image — no host file mounts: `/` → web, `/api/*` → pakodj), optional `cloudflared` under the `tunnel` profile. Point the Tunnel hostname at `http://nginx:80` in the Cloudflare dashboard and the whole platform (panel + API) is live with zero published ports.
 
 | Method | Endpoint | Auth | Description |
 | ------ | -------- | ---- | ----------- |

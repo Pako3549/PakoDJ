@@ -38,7 +38,8 @@ end users.
 7. **Push to `main` deploys to the user's live Raspberry Pi 5** (self-hosted
    runner). Never push without explicit user approval, and keep the repo
    deployable: the workflow rewrites `bot/.env` from GitHub secrets on every
-   deploy.
+   deploy. **The same applies to `git commit`: never create a commit (or any
+   other git-history action) without the user's explicit approval.**
 
 ## Code conventions (quick reference)
 
@@ -72,10 +73,10 @@ end users.
 | `compose.yml` | Dev stack (pakodj-dev + web + nginx on 8080 + db; no tunnel service) |
 | `deploy/compose.yml` | Production stack pulled from GHCR (bot + web + nginx, no ports, `tunnel` profile) |
 | `deploy/compose.build.yml` | Production stack built on the host |
-| `.github/workflows/docker-publish.yml` | Build (multi-arch GHCR: bot + web images) + deploy to the Pi (rewrites `bot/.env` from secrets) |
+| `.github/workflows/docker-publish.yml` | Build (multi-arch GHCR: bot + web + nginx images) + deploy to the Pi (rewrites `bot/.env` from secrets) |
 | `runner/compose.yml` | Self-hosted GitHub Actions runner stack |
 | `web/` | Webapp: React + Vite + TypeScript panel (dev: Vite hot reload target; prod target: static build served by an internal nginx) |
-| `nginx/` | Webserver configs: one origin for everything — `dev.conf` (dev stack) routes `/` to web + `/api/*` to the bot; `prod.conf` routes to the deploy-stack service names, the Tunnel target |
+| `nginx/` | Webserver configs: one origin for everything — `dev.conf` (dev stack) routes `/` to web + `/api/*` to the bot; `prod.conf` + `Dockerfile` produce the `pakodj-nginx` image (config baked in) used by the deploy composes |
 | `docs/` | Agent documentation (architecture, permission model, GUI style for the web frontend) |
 
 ## Environment variables

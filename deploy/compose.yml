@@ -38,17 +38,17 @@ services:
     depends_on:
       - pakodj
 
-  # Single entry point for the panel (web) and the API (/api/* proxy) with no
-  # published ports: point the Cloudflare Tunnel hostname at http://nginx:80.
+  # Single entry point for the panel (web) and the API (/api proxy), with
+  # the config baked into the image: no host file mounts, so the deploy
+  # never depends on the runner workspace state. The Cloudflare Tunnel
+  # hostname maps here (http://nginx:80).
   nginx:
-    image: nginx:stable-alpine
+    image: ghcr.io/pako3549/pakodj-nginx:latest
     container_name: pakodj-nginx
     restart: unless-stopped
     depends_on:
       - web
       - pakodj
-    volumes:
-      - ../nginx/prod.conf:/etc/nginx/conf.d/default.conf:ro
 
   db:
     image: postgres:17-alpine

@@ -130,9 +130,12 @@ in-app rate limiting** — a public deployment sits behind Cloudflare rules.
 - **DEV (`compose.yml`):** `web` runs `npm run dev` (Vite, hot reload) with
   the source mounted; nginx publishes `8080:80` — the only published port in
   the whole platform, dev only.
-- **Production (actual wiring):** CI pushes two GHCR images: `pakodj` (bot +
-  API, root `Dockerfile`) and `pakodj-web` (static build — `web/Dockerfile`
-  `target: prod`, an internal nginx serving `dist/` with SPA fallback).
+- **Production (actual wiring):** CI pushes three GHCR images: `pakodj` (bot +
+  API, root `Dockerfile`), `pakodj-web` (static build — `web/Dockerfile`
+  `target: prod`, an internal nginx serving `dist/` with SPA fallback) and
+  `pakodj-nginx` (the entry-point reverse proxy, `nginx/Dockerfile`, with
+  `prod.conf` baked in — no host file mounts, so a failed run can never leave
+  stray workspace state behind).
   Both deploy composes run `pakodj` + `db` + `web` + `nginx` (+ `cloudflared`
   under the `tunnel` profile) with **no published ports**; the Tunnel maps
   the public hostname (planned: `https://dj.pako.uk`) to `nginx:80`, so the
