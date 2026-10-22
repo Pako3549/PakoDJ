@@ -9,8 +9,6 @@ on:
   workflow_dispatch:
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-  WEB_IMAGE_NAME: ${{ github.repository }}-web
 
 jobs:
   build:
@@ -22,6 +20,17 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+
+    # GHCR requires lowercase repositories; compute the image names once
+    # from the repository (native bash lowercase expansion).
+    - name: Set lowercase image names
+      id: names
+      run: |
+        echo "bot=${REGISTRY,,}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        echo "web=${REGISTRY,,}/${GITHUB_REPOSITORY,,}-web" >> "$GITHUB_OUTPUT"
+        echo "nginx=${REGISTRY,,}/${GITHUB_REPOSITORY,,}-nginx" >> "$GITHUB_OUTPUT"
+      env:
+        REGISTRY: ghcr.io
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -40,8 +49,8 @@ jobs:
         platforms: linux/amd64,linux/arm64
         push: true
         tags: |
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          ${{ steps.names.outputs.bot }}:latest
+          ${{ steps.names.outputs.bot }}:${{ github.sha }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
@@ -53,8 +62,8 @@ jobs:
         platforms: linux/amd64,linux/arm64
         push: true
         tags: |
-          ${{ env.REGISTRY }}/${{ env.WEB_IMAGE_NAME }}:latest
-          ${{ env.REGISTRY }}/${{ env.WEB_IMAGE_NAME }}:${{ github.sha }}
+          ${{ steps.names.outputs.web }}:latest
+          ${{ steps.names.outputs.web }}:${{ github.sha }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
@@ -65,8 +74,8 @@ jobs:
         platforms: linux/amd64,linux/arm64
         push: true
         tags: |
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-nginx:latest
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-nginx:${{ github.sha }}
+          ${{ steps.names.outputs.nginx }}:latest
+          ${{ steps.names.outputs.nginx }}:${{ github.sha }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
