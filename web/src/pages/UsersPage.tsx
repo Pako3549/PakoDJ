@@ -364,7 +364,12 @@ export default function UsersPage() {
     }
     if (!calls.length) return;
     run(`modal:${u.id}`, () => Promise.all(calls)).then((ok) => {
-      if (ok) clearStaging(u.id);
+      if (ok) {
+        // Success closes the editor: grants are visible in the list and
+        // nothing stays staged.
+        clearStaging(u.id);
+        setOpenId((prev) => (prev === u.id ? null : prev));
+      }
     });
   };
 
@@ -473,14 +478,18 @@ export default function UsersPage() {
                   <p className="text-sm text-primary truncate">{r.username}</p>
                   <p className="text-xs text-secondary truncate">
                     {r.guild_id === null ? (
-                      <>wants <span className="text-muted">generic access (no shared server)</span></>
+                      <>requests <span className="text-muted">generic access (no shared server)</span></>
                     ) : (
                       <>
-                        wants <span className="text-muted">{r.guild_name || r.guild_id}</span>
+                        requests access to <span className="text-muted">{r.guild_name || r.guild_id}</span>
                       </>
                     )}
-                    {r.message && <span> · {r.message}</span>}
                   </p>
+                  {r.message && (
+                    <p className="mt-1.5 pl-2.5 border-l-2 border-accent/50 text-xs text-secondary italic leading-relaxed break-words">
+                      {r.message}
+                    </p>
+                  )}
                 </div>
                 <button
                   onClick={() => grantAccess(r.user_id, r.id, r.guild_id)}
@@ -510,7 +519,7 @@ export default function UsersPage() {
           <input
             type="search"
             value={search}
-            placeholder="Search by name or discord id..."
+            placeholder="Search"
             onChange={(e) => {
               setSearch(e.target.value);
               setPage(1);
@@ -885,43 +894,50 @@ export default function UsersPage() {
               </div>
             </div>
 
-            {/* Second step of the removal: a real confirm dialog on top. */}
-            {confirmDelete === u.id && (
-              <div
-                className="fixed inset-0 z-[70] bg-black/70 flex items-center justify-center p-4"
-                onClick={() => setConfirmDelete(null)}
-              >
-                <div
-                  className="bg-card border border-red-500/40 rounded-xl max-w-sm w-full p-5 shadow-xl"
-                  onClick={(e) => e.stopPropagation()}
-                  role="alertdialog"
-                  aria-modal="true"
-                >
-                  <h3 className="text-sm font-medium text-primary">Remove {u.username}?</h3>
-                  <p className="text-xs text-muted mt-2">
-                    This deletes the account together with its sessions and access
-                    requests. The user can log in again later, starting from zero.
-                  </p>
-                  <div className="flex justify-end gap-2 mt-4">
-                    <button
-                      onClick={() => setConfirmDelete(null)}
-                      disabled={busy !== null}
-                      className="px-3 py-1.5 rounded-lg bg-card border border-border text-xs text-secondary hover:text-primary transition disabled:opacity-50"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={() => deleteUser(u.id)}
-                      disabled={busy !== null}
-                      className="px-3 py-1.5 rounded-lg bg-red-500/90 text-inverse text-xs font-medium hover:bg-red-500 transition disabled:opacity-50"
-                    >
-                      Confirm remove
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
           </>
+        );
+      })()}
+
+      {/* Second step of the removal: a page-level confirm dialog. It lives
+          OUTSIDE the modal so the trash button works from the plain list,
+          and stacks above the modal when the editor is open. */}
+      {(() => {
+        const target = users?.find((x) => x.id === confirmDelete);
+        if (!target) return null;
+        return (
+          <div
+            className="fixed inset-0 z-[70] bg-black/70 flex items-center justify-center p-4"
+            onClick={() => setConfirmDelete(null)}
+          >
+            <div
+              className="bg-card border border-red-500/40 rounded-xl max-w-sm w-full p-5 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+              role="alertdialog"
+              aria-modal="true"
+            >
+              <h3 className="text-sm font-medium text-primary">Remove {target.username}?</h3>
+              <p className="text-xs text-muted mt-2">
+                This deletes the account together with its sessions and access
+                requests. The user can log in again later, starting from zero.
+              </p>
+              <div className="flex justify-end gap-2 mt-4">
+                <button
+                  onClick={() => setConfirmDelete(null)}
+                  disabled={busy !== null}
+                  className="px-3 py-1.5 rounded-lg bg-card border border-border text-xs text-secondary hover:text-primary transition disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => deleteUser(target.id)}
+                  disabled={busy !== null}
+                  className="px-3 py-1.5 rounded-lg bg-red-500/90 text-inverse text-xs font-medium hover:bg-red-500 transition disabled:opacity-50"
+                >
+                  Confirm remove
+                </button>
+              </div>
+            </div>
+          </div>
         );
       })()}
     </main>

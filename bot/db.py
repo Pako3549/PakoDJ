@@ -521,11 +521,26 @@ async def create_access_request(user_id, guild_id, guild_name, message):
 async def list_access_requests():
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetch(
-            "SELECT r.id, r.user_id, u.username, r.guild_id, r.guild_name, "
+            # guild_id is cast to text: Discord ids exceed the JS safe
+            # integer range, and the panel re-uses this value in path params.
+            "SELECT r.id, r.user_id, u.username, r.guild_id::text, r.guild_name, "
             "r.message, r.status, r.created_at "
             "FROM access_requests r JOIN users u ON u.id = r.user_id "
             "WHERE r.status = 'pending' ORDER BY r.created_at"
         )
+
+
+async def list_pending_access_requests_by_user(user_id):
+    """Pending requests of one account: the pending guild ids plus whether a
+    generic request is open. The web panel uses it to restore the already-
+    requested state after a reload (no re-click on a pending ask)."""
+    async with _pool_or_raise().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT guild_id FROM access_requests "
+            "WHERE user_id = $1 AND status = 'pending'",
+            user_id
+        )
+        return [r['guild_id'] for r in rows]
 
 
 async def set_access_request_status(request_id, status):

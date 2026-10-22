@@ -12,7 +12,10 @@ export default function OauthCallbackPage() {
     const token = params.get("session_token");
     if (token) {
       setToken(token);
-      navigate("/", { replace: true });
+      // Full document load instead of SPA navigation: the dashboard mounts
+      // on a clean location (no router state carried over from the OAuth
+      // redirect), and the URL fragment stays out of the address bar.
+      window.location.replace("/");
     } else {
       navigate("/login", { replace: true });
     }

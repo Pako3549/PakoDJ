@@ -169,6 +169,7 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `DELETE` | `/api/users/{id}/guilds/{guild_id}` | `manage_users` | Drop the per-guild override |
 | `GET` | `/api/access/guilds` | session | Guilds shared between the account and the bot |
 | `GET` | `/api/access-requests` | `manage_users` | Pending access requests (panel queue) |
+| `GET` | `/api/access-requests/mine` | session | Pending requests of the current account (guild ids + generic flag) — panel restores the "requested" state on load |
 | `POST` | `/api/access-requests` | session | Submit an access request for a shared guild, or a generic one (`guild_id` omitted) |
 | `PATCH` | `/api/access-requests/{id}` | `manage_users` | Resolve a request (`granted`/`denied`) |
 | `GET` | `/api/guilds` | session | Servers the bot is in, filtered by what the account may see: global `view` = all, otherwise only the guilds carrying a per-guild `view` override |

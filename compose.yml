@@ -7,6 +7,8 @@ services:
       - bot/.env
     environment:
       DATABASE_URL: postgres://pakodj:pakodj@db:5432/pakodj
+      # API_PUBLIC_ORIGIN is NOT overridden here: bot/.env owns it (production
+      # value arrives via the deploy workflow secrets rewrite).
       # Web API login happens via Discord OAuth (see Web API section in README);
       # put these in bot/.env to enable it (until then the endpoints return 503):
       # DISCORD_CLIENT_ID: your_discord_app_client_id

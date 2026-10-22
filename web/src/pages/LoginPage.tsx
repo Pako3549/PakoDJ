@@ -1,31 +1,33 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiFetch, getToken, setToken } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
+// Centered sign-in card, mirroring the request-access screen: avatar, bold
+// title, muted subtitle and one accent action. Discord OAuth is the only
+// way in; no manual token fallback. OAuth callback failures land back here
+// with ?error=... (shown once, then stripped from the URL).
 export default function LoginPage() {
   const navigate = useNavigate();
-  const [manualToken, setManualToken] = useState("");
   const [starting, setStarting] = useState(false);
-  const [error, setError] = useState("");
-  const [info, setInfo] = useState("");
+  const [error, setError] = useState(
+    () => new URLSearchParams(window.location.search).get("error") ?? ""
+  );
 
-  // A session token in the query string is the manual-fallback path of the
-  // OAuth flow; with no token, an existing valid session jumps to the panel.
+  // One-shot error from the OAuth callback: displayed, then removed from
+  // the address bar so a manual refresh does not re-surface a stale one.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const urlToken = params.get("token");
-    if (urlToken) {
-      setToken(urlToken);
-      navigate("/", { replace: true });
-      return;
+    if (params.has("error")) {
+      params.delete("error");
+      const qs = params.toString();
+      navigate(`/login${qs ? `?${qs}` : ""}`, { replace: true });
     }
-    if (getToken()) navigate("/", { replace: true });
-  }, [navigate]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function startDiscordLogin() {
     setStarting(true);
     setError("");
-    setInfo("");
     try {
       const { authorize_url } = await apiFetch<{ authorize_url: string }>(
         "/api/auth/discord/start",
@@ -38,56 +40,31 @@ export default function LoginPage() {
     }
   }
 
-  function loginWithToken(e: React.FormEvent) {
-    e.preventDefault();
-    const token = manualToken.trim();
-    if (!token) {
-      setError("Paste the session token");
-      return;
-    }
-    setToken(token);
-    navigate("/", { replace: true });
-  }
-
   return (
-    <main className="max-w-md mx-auto px-4 py-16">
-      <div className="bg-card border border-border rounded-xl p-6">
-        <img src="/bot.png" alt="PakoDJ" className="w-12 h-12 rounded-xl mb-3" />
-        <h1 className="text-lg font-semibold mb-1">PakoDJ</h1>
-        <p className="text-xs text-muted mb-6">Sign in with your Discord account</p>
+    <main className="min-h-svh flex items-center justify-center px-4">
+      <div className="w-full max-w-sm bg-card border border-border rounded-xl p-6">
+        <header className="flex items-center gap-3 mb-5">
+          <img src="/bot.png" alt="PakoDJ" className="w-10 h-10 rounded-xl" />
+          <div>
+            <h1 className="text-lg font-semibold">PakoDJ</h1>
+            <p className="text-xs text-muted">Discord music control panel</p>
+          </div>
+        </header>
+
+        <p className="text-sm text-secondary mb-5">
+          Sign in with your Discord account: an admin reviews what you can see
+          and control.
+        </p>
+
+        {error && <p className="text-xs text-red-400 mb-3">{error}</p>}
 
         <button
           onClick={startDiscordLogin}
           disabled={starting}
-          className="w-full px-4 py-2 rounded-lg bg-accent text-inverse text-sm font-medium hover:bg-accent/90 transition disabled:opacity-50"
+          className="w-full px-4 py-2.5 rounded-lg bg-accent text-inverse text-sm font-medium hover:bg-accent/90 transition disabled:opacity-50"
         >
           {starting ? "Redirecting..." : "Login with Discord"}
         </button>
-
-        {error && <p className="text-xs text-red-400 mt-3">{error}</p>}
-        {info && <p className="text-xs text-secondary mt-3">{info}</p>}
-
-        <div className="border-t border-border my-6" />
-
-        <p className="text-xs text-muted mb-2">
-          Manual fallback: if Discord redirected you back to a JSON page, copy
-          the <code className="text-secondary">session_token</code> value and paste it here.
-        </p>
-        <form onSubmit={loginWithToken} className="flex gap-2">
-          <input
-            type="text"
-            value={manualToken}
-            onChange={(e) => setManualToken(e.target.value)}
-            placeholder="session_token"
-            className="flex-1 px-3 py-2 rounded-lg bg-surface border border-border text-sm text-primary placeholder:text-muted focus:outline-none focus:border-accent/60"
-          />
-          <button
-            type="submit"
-            className="px-4 py-2 rounded-lg bg-card border border-border text-sm text-secondary hover:text-primary transition"
-          >
-            Enter
-          </button>
-        </form>
       </div>
     </main>
   );

@@ -25,7 +25,7 @@ import hashlib
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Literal, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -300,13 +300,25 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
 
     @app.get("/api/auth/discord/callback")
     async def discord_callback(request: Request, code: str = '', state: str = ''):
+        # Browser callers must never land on a dead JSON page (a bot restart
+        # between /start and the callback invalidates the state, for example):
+        # failures bounce back to /login with the reason as a query param.
+        async def _fail(detail: str):
+            if request.query_params.get('json') != '1':
+                from fastapi.responses import RedirectResponse
+                return RedirectResponse(
+                    url=f"/login?error={quote(detail, safe='')}",
+                    status_code=303
+                )
+            raise HTTPException(status_code=400, detail=detail)
+
         if not discord_login_configured():
-            raise HTTPException(status_code=503, detail="Discord login not configured")
+            return await _fail("Discord login not configured")
         expiry = _oauth_states.pop(state, None) if state else None
         if expiry is None or expiry < time.time():
-            raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
+            return await _fail("Login state expired, start again")
         if not code:
-            raise HTTPException(status_code=400, detail="Missing Discord authorization code")
+            return await _fail("Missing Discord authorization code")
 
         import aiohttp  # provided by discord.py
         async with aiohttp.ClientSession() as session:
@@ -318,7 +330,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
                 'redirect_uri': f"{API_PUBLIC_ORIGIN}/api/auth/discord/callback",
             })
             if resp.status != 200:
-                raise HTTPException(status_code=400, detail="Discord token exchange failed")
+                return await _fail("Discord token exchange failed")
             tokens = await resp.json()
             auth_headers = {
                 'Authorization': f"Bearer {tokens['access_token']}",
@@ -326,7 +338,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
             }
             resp = await session.get('https://discord.com/api/users/@me', headers=auth_headers)
             if resp.status != 200:
-                raise HTTPException(status_code=400, detail="Discord identify failed")
+                return await _fail("Discord identify failed")
             me = await resp.json()
             resp = await session.get('https://discord.com/api/users/@me/guilds', headers=auth_headers)
             user_guilds = (await resp.json()) if resp.status == 200 else []
@@ -554,13 +566,35 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         except (ValueError, TypeError):
             snapshot = set()
         return [
-            {"id": str(g.id), "name": g.name} for g in bot.guilds if str(g.id) in snapshot
+            {
+                "id": str(g.id),
+                "name": g.name,
+                # Icon CDN URL for the Discord-style server picker; None falls
+                # back to the initials placeholder in the panel.
+                "icon": str(g.icon.url) if g.icon else None,
+            }
+            for g in bot.guilds
+            if str(g.id) in snapshot
         ]
 
     @app.get("/api/access-requests")
     async def access_requests(admin: dict = Depends(_require_permission('manage_users'))):
         rows = await database.list_access_requests()
         return [_row_dict(r) for r in rows]
+
+    @app.get("/api/access-requests/mine")
+    async def my_pending_access_requests(user: dict = Depends(_require_account)):
+        """Pending asks of the CURRENT account only: which guild ids and
+        whether a generic request is open. The panel restores the requested
+        badges on load so pending asks cannot be re-clicked. Generic and
+        admin queues live on the other access-requests routes."""
+        guild_ids = await database.list_pending_access_requests_by_user(user['id'])
+        # Strings: Discord ids overflow the JS safe integer, and the panel
+        # matches them against the picker ids (also strings).
+        return {
+            "guild_ids": [str(gid) for gid in guild_ids if gid is not None],
+            "generic": None in guild_ids,
+        }
 
     @app.post("/api/access-requests")
     async def request_access(body: AccessRequestCreate, user: dict = Depends(_require_account)):
