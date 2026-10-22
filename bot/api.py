@@ -55,8 +55,14 @@ class SkipRequest(BaseModel):
     all: bool = False
 
 
-class PermissionsRequest(BaseModel):
+class GlobalPermissionsRequest(BaseModel):
     permissions: list[Literal['view', 'search', 'queue', 'queue_manage', 'playback', 'manage_users']] = Field(max_length=6)
+
+
+# Per-guild overrides never carry manage_users: account administration is a
+# global-only capability, so the narrower Literal rejects it at the API gate.
+class GuildPermissionsRequest(BaseModel):
+    permissions: list[Literal['view', 'search', 'queue', 'queue_manage', 'playback']] = Field(max_length=5)
 
 
 class AccessRequestCreate(BaseModel):
@@ -88,12 +94,14 @@ _oauth_states = {}  # CSRF state -> expiry timestamp
 _snapshot_refresh_lock = asyncio.Lock()
 
 
-async def refresh_user_guilds_snapshot(user):
+async def refresh_user_guilds_snapshot(user, bot):
     """Refresh users.guild_ids from Discord with the stored OAuth pair: this
-    is what keeps guild joins and leaves accurate without a new login.
-    Returns the fresh guild ID list, or None when nothing could be fetched
-    (no tokens, revoked/expired refresh, Discord hiccup) so the caller falls
-    back to the stored snapshot without failing the read."""
+    is what keeps guild joins and leaves accurate without a new login. Like
+    the login path it stores only the intersection with the bot's live
+    guilds (the snapshot means shared-with-bot). Returns the fresh guild ID
+    list, or None when nothing could be fetched (no tokens, revoked/expired
+    refresh, Discord hiccup) so the caller falls back to the stored
+    snapshot without failing the read."""
     access = user.get('discord_access_token') or ''
     refresh = user.get('discord_refresh_token') or ''
     if not access and not refresh:
@@ -137,7 +145,8 @@ async def refresh_user_guilds_snapshot(user):
             if resp.status != 200:
                 return None
             user_guilds = await resp.json()
-        ids = [str(g.get('id')) for g in user_guilds if g.get('id')]
+        bot_guild_ids = {str(g.id) for g in bot.guilds}
+        ids = [str(g.get('id')) for g in user_guilds if g.get('id') and str(g.get('id')) in bot_guild_ids]
     await database.set_user_guilds_snapshot(user['id'], json.dumps(ids))
     return ids
 _search_cache: dict = {}  # metadata query -> (expiry timestamp, results), 5-minute TTL
@@ -440,6 +449,12 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
             {
                 **dict(r),
                 "permissions": database.parse_permissions(r['permissions']),
+                # json_agg arrives as a JSON string: parse once, then normalize
+                # every override permission set into a real array.
+                "guild_overrides": [
+                    {**_row_dict(o), "permissions": database.parse_permissions(o['permissions'])}
+                    for o in (json.loads(r['guild_overrides']) if r['guild_overrides'] else [])
+                ],
                 "avatar_url": avatar_url(r['discord_id'], r.get('avatar_hash')),
             }
             for r in rows
@@ -462,7 +477,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
 
     @app.patch("/api/users/{user_id}")
     async def set_permissions(
-        user_id: int, body: PermissionsRequest, admin: dict = Depends(_require_permission('manage_users'))
+        user_id: int, body: GlobalPermissionsRequest, admin: dict = Depends(_require_permission('manage_users'))
     ):
         target = await database.get_user_by_id(user_id)
         if target is None:
@@ -496,7 +511,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
 
     @app.put("/api/users/{user_id}/guilds/{guild_id}")
     async def set_guild_permissions(
-        user_id: int, guild_id: int, body: PermissionsRequest,
+        user_id: int, guild_id: int, body: GuildPermissionsRequest,
         admin: dict = Depends(_require_permission('manage_users'))
     ):
         target = await database.get_user_by_id(user_id)
@@ -531,7 +546,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         leaving a server shows up without any re-login; on a Discord failure
         the last stored snapshot is used, stale but real."""
         try:
-            live = await refresh_user_guilds_snapshot(user)
+            live = await refresh_user_guilds_snapshot(user, bot)
         except Exception:
             live = None
         try:
@@ -558,7 +573,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         # Generic requests skip the check entirely (one pending per user).
         if body.guild_id is not None:
             try:
-                live = await refresh_user_guilds_snapshot(user)
+                live = await refresh_user_guilds_snapshot(user, bot)
             except Exception:
                 live = None
             try:

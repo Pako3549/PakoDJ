@@ -75,11 +75,14 @@ platform must serve a future web app with concurrent readers.
   (`nobody`/`viewer`/`admin`) are migrated once at load into equivalent sets.
 - **Per-guild overrides:** `user_guild_permissions` rows replace the global
   set inside that specific guild only (insert = override, delete = back to
-  global). Endpoints whose path carries `guild_id` resolve the override
-  automatically. `GET /api/guilds` encodes the same rule for the dashboard:
-  global `view` lists every bot guild; an account without it sees only the
-  guilds whose override carries `view` (this is how single-server access
-  requests are honoured with a scoped grant instead of a global one).
+  global). They never carry `manage_users`: account administration is a
+  global-only capability, so the override endpoint uses a narrower
+  `Literal` model and rejects the key with `422`. Endpoints whose path
+  carries `guild_id` resolve the override automatically. `GET /api/guilds`
+  encodes the same rule for the dashboard: global `view` lists every bot
+  guild; an account without it sees only the guilds whose override carries
+  `view` (this is how single-server access requests are honoured with a
+  scoped grant instead of a global one).
 - **Seeded admins (`DISCORD_ADMIN_IDS`, comma separated):** env is
   authoritative. At login the full permission set is forced and `seed=true`.
   No API call can change a seeded account (route returns `403`, plus SQL

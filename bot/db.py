@@ -458,10 +458,18 @@ async def upsert_discord_user(discord_id, username, avatar_hash, env_role):
 
 
 async def list_users():
+    """Accounts plus their per-guild overrides in one join (no N+1 reads from
+    the panel): overrides ride along so the list can show scoped grants."""
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetch(
-            "SELECT id, username, created_at, role, seed, discord_id, avatar_hash, permissions FROM users "
-            "ORDER BY created_at"
+            "SELECT u.id, u.username, u.created_at, u.role, u.seed, u.discord_id, "
+            "u.avatar_hash, u.permissions, "
+            "COALESCE(json_agg(json_build_object("
+            "  'guild_id', o.guild_id::text, 'permissions', o.permissions"
+            ")) FILTER (WHERE o.user_id IS NOT NULL), '[]'::json) AS guild_overrides, "
+            "u.guild_ids "
+            "FROM users u LEFT JOIN user_guild_permissions o ON o.user_id = u.id "
+            "GROUP BY u.id ORDER BY u.created_at"
         )
 
 
