@@ -1067,6 +1067,56 @@ async def on_guild_remove(guild):
     await database.clear_now_playing(guild.id)
     get_server_info(guild.id)['current_track'] = None
 
+# Accept/Deny quick actions on the admin access-request DM: the buttons are
+# plain custom_id conventions (reqdm:grant|deny:<id>) resolved by this raw
+# listener, so they keep working after a restart without view registration.
+# bot.listen keeps the default on_interaction dispatch (views, commands) intact.
+@bot.listen("on_interaction")
+async def _access_request_dm_buttons(interaction):
+    if interaction.type != discord.InteractionType.component:
+        return
+    parts = ((interaction.data or {}).get("custom_id") or "").split(":")
+    if len(parts) != 3 or parts[0] != "reqdm" or parts[1] not in ("grant", "deny"):
+        return
+    try:
+        from api import DISCORD_ADMIN_IDS, resolve_access_request_from_dm
+    except ImportError:
+        await interaction.response.send_message("Web API module unavailable on this bot.", ephemeral=True)
+        return
+    if str(interaction.user.id) not in DISCORD_ADMIN_IDS:
+        await interaction.response.send_message("Only bot admins may resolve access requests.", ephemeral=True)
+        return
+    try:
+        request_id = int(parts[2])
+    except ValueError:
+        return
+    actor = f"{interaction.user.name} (DM)"
+    outcome = await resolve_access_request_from_dm(request_id, parts[1] == "grant", actor)
+    if outcome == "granted":
+        label, color = f"Accepted by {actor}", discord.Color.green()
+    elif outcome == "denied":
+        label, color = f"Denied by {actor}", discord.Color.red()
+    elif outcome == "already":
+        # Resolved elsewhere (web panel or another admin's DM copy): mark
+        # THIS message with the same "by ..." line using the recorded
+        # resolver, instead of scolding whoever clicked the stale button.
+        row = await database.get_access_request(request_id)
+        if row is None or row['status'] not in ('granted', 'denied'):
+            label, color = "Request removed", discord.Color.greyple()
+        else:
+            verb = "Accepted" if row['status'] == 'granted' else "Denied"
+            label = f"{verb} by {row['resolved_by']}" if row['resolved_by'] else verb
+            color = discord.Color.green() if row['status'] == 'granted' else discord.Color.red()
+    else:
+        label, color = "Request removed", discord.Color.greyple()
+    if interaction.message.embeds:
+        embed = interaction.message.embeds[0]
+        embed.colour = color
+        embed.add_field(name="Decision", value=label, inline=False)
+        await interaction.response.edit_message(embed=embed, view=None)
+    else:
+        await interaction.response.edit_message(content=f"{label}.", view=None)
+
 # Keep runtime state consistent if the bot leaves voice unexpectedly
 @bot.event
 async def on_voice_state_update(member, before, after):

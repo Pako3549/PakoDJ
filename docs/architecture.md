@@ -123,6 +123,14 @@ platform must serve a future web app with concurrent readers.
   Each created request DMs every env admin (best effort, 10 s timeout,
   silent failure) so the panel does not need watching; resolving a request
   clears the row immediately via the follow-up reload in the web UI.
+  The admin DM carries Accept/Deny buttons resolved by a raw
+  `on_interaction` listener (custom_id convention `reqdm:grant|deny:<id>`)
+  through the shared `resolve_access_request_from_dm` helper: same permission
+  flow as the panel, atomic pending-only status flip (one winner on races),
+  same SSE events, then the message is recolored with a one-line decision.
+  Clicks on stale copies (already resolved from the panel or by another
+  admin) re-mark that message with the actual outcome; a removed request
+  greys it out.
 - **Open login, closed API:** any Discord account can complete the OAuth
   flow (the shared-server gate was dropped to make onboarding possible when
   the bot and the user share nothing yet). A new account starts with an

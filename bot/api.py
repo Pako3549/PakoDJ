@@ -23,6 +23,7 @@ import json
 import secrets
 import hashlib
 import asyncio
+import discord
 from datetime import datetime, timezone, timedelta
 from typing import Literal, Optional
 from urllib.parse import quote, urlencode
@@ -225,6 +226,60 @@ def _notify_admins(event: str, data: str) -> None:
         for q, is_admin in entries:
             if is_admin and q.qsize() < q.maxsize:
                 q.put_nowait((event, data))
+
+
+async def resolve_access_request_from_dm(request_id: int, grant: bool, actor: str) -> str:
+    """Shared resolver behind the Accept/Deny buttons on the admin DM: the
+    same permission flow as the web panel (guild request -> `view` merged
+    into that guild's override, generic request -> `view` merged into the
+    global set), then the atomic status flip and the usual live-update
+    events. `actor` is recorded so any DM copy can show who decided and
+    from where. Returns one of 'granted', 'denied', 'already', 'unknown'."""
+    row = await database.get_access_request(request_id)
+    if row is None:
+        return 'unknown'
+    if row['status'] != 'pending':
+        return 'already'
+    if grant and not row['seed']:
+        # Seeded accounts are untouchable (and would never need a grant).
+        user = await database.get_user_by_id(row['user_id'])
+        if user is not None and not user['seed']:
+            if row['guild_id'] is not None:
+                existing = await database.get_user_guild_permissions(row['user_id'], row['guild_id'])
+                perms = database.parse_permissions(existing['permissions']) if existing else []
+            else:
+                perms = database.parse_permissions(user['permissions'])
+            if 'view' not in perms:
+                perms = [*perms, 'view']
+            if row['guild_id'] is not None:
+                await database.set_user_guild_permissions(row['user_id'], row['guild_id'], perms)
+            else:
+                await database.set_user_permissions(row['user_id'], perms)
+    status = 'granted' if grant else 'denied'
+    updated = await database.set_access_request_status(request_id, status, actor)
+    if updated is None:
+        return 'already'
+    if grant:
+        _notify_user(row['user_id'], "granted", "true")
+    _notify_admins("requests", str(request_id))
+    return status
+
+
+class AccessRequestDMView(discord.ui.View):
+    """Accept/Deny quick actions on the admin DM. The buttons carry only a
+    custom_id convention resolved by the raw on_interaction listener in the
+    bot core, so they keep working after a restart (no view registration)."""
+
+    def __init__(self, request_id: int):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label="Accept", style=discord.ButtonStyle.success,
+            custom_id=f"reqdm:grant:{request_id}",
+        ))
+        self.add_item(discord.ui.Button(
+            label="Deny", style=discord.ButtonStyle.danger,
+            custom_id=f"reqdm:deny:{request_id}",
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -722,20 +777,20 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         # ids must never fail the created request; the timeout bounds the
         # latency of a slow Discord API). Seeded admins are exactly the env
         # list, so DMing it reaches whoever owns the deployment.
-        label = (
-            f"requests access to the server {guild_name}"
-            if body.guild_id is not None
-            else "requests generic access to PakoDJ (no shared server)"
+        embed = discord.Embed(title="Access request", color=0x5865F2)
+        embed.add_field(name="User", value=user['username'], inline=True)
+        embed.add_field(
+            name="Server",
+            value=(guild_name if body.guild_id is not None else "Generic") or "Unknown server",
+            inline=True,
         )
-        text = f"{user['username']} {label}"
         if body.message.strip():
-            text += f"\n\nMessage: {body.message.strip()}"
-        text += "\n\nOpen the web panel, Users page, to grant or deny."
+            embed.add_field(name="Note", value=body.message.strip()[:1000], inline=False)
 
         async def _dm_admin(admin_id: str):
             admin_user = bot.get_user(int(admin_id)) or await bot.fetch_user(int(admin_id))
             if admin_user is not None:
-                await admin_user.send(text[:1900])
+                await admin_user.send(embed=embed, view=AccessRequestDMView(request_id))
 
         try:
             await asyncio.wait_for(
@@ -750,9 +805,11 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
 
     @app.patch("/api/access-requests/{request_id}")
     async def resolve_access_request(request_id: int, body: AccessRequestUpdate, admin: dict = Depends(_require_permission('manage_users'))):
-        updated = await database.set_access_request_status(request_id, body.status)
+        updated = await database.set_access_request_status(
+            request_id, body.status, f"{admin['username']} (web panel)"
+        )
         if updated is None:
-            raise HTTPException(status_code=404, detail="Unknown request or invalid status")
+            raise HTTPException(status_code=404, detail="Unknown or already resolved request")
         if body.status == 'granted':
             _notify_user(updated['user_id'], "granted", "true")
         return dict(updated)

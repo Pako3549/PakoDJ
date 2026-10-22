@@ -126,6 +126,10 @@ CREATE TABLE IF NOT EXISTS access_requests (
 -- One pending request per (user, guild);
 -- guild_id IS NULL means a generic request (no shared server at all).
 ALTER TABLE access_requests ALTER COLUMN guild_id DROP NOT NULL;
+-- Who resolved the request and through which surface, e.g.
+-- "Pako (web panel)" or "Pako (DM)": the DM cards read it to show the
+-- same "Accepted/Denied by ..." line regardless of where the click landed.
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS resolved_by TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_pending
     ON access_requests (user_id, guild_id) WHERE status = 'pending';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_pending_generic
@@ -583,15 +587,32 @@ async def list_pending_access_requests_by_user(user_id):
         return [r['guild_id'] for r in rows]
 
 
-async def set_access_request_status(request_id, status):
-    """Resolve a request (granted/denied); returns the row or None."""
+async def set_access_request_status(request_id, status, resolved_by=None):
+    """Resolve a pending request (granted/denied), recording who decided it
+    and through which surface (e.g. "Pako (web panel)"); returns the row or
+    None when unknown or already resolved (the WHERE clause makes the
+    resolution atomic: a race between two resolvers yields one winner)."""
     if status not in ('granted', 'denied'):
         return None
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetchrow(
-            "UPDATE access_requests SET status = $2 WHERE id = $1 "
+            "UPDATE access_requests SET status = $2, resolved_by = $3 "
+            "WHERE id = $1 AND status = 'pending' "
             "RETURNING id, user_id, status",
-            request_id, status
+            request_id, status, resolved_by
+        )
+
+
+async def get_access_request(request_id):
+    """Full row of one access request (joined username/seed for resolvers);
+    None when the id is unknown."""
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT r.id, r.user_id, u.username, u.seed, r.guild_id, "
+            "r.guild_name, r.message, r.status, r.resolved_by, r.created_at "
+            "FROM access_requests r JOIN users u ON u.id = r.user_id "
+            "WHERE r.id = $1",
+            request_id
         )
 
 

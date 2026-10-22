@@ -145,8 +145,17 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 1. `GET /api/access/guilds` — servers where BOTH the user and the bot are; the shared-guilds snapshot is refreshed from Discord right on this read (stored user OAuth token, auto-refreshed on expiry), so joining or leaving a server shows up without logging in again; on any Discord failure the last stored snapshot answers (stale but real)
 2. `POST /api/access-requests {"guild_id": ..., "message": "why I want access"}` — one pending request per guild, validated against that same list; with no `guild_id` the request is **generic** (allowed even sharing no server with the bot, one pending per user, `guild_id: null` in the queue)
 3. users with `manage_users` see the queue with `GET /api/access-requests` (username, guild or `null`, message) and resolve each one with `PATCH /api/access-requests/{id} {"status": "granted"|"denied"}`; the grant itself is scoped: a **guild request** creates the per-guild override (`PUT /api/users/{id}/guilds/{guild_id}` with `["view"]`, the global set stays empty, the user sees only that server) while a **generic request** grants global `view` (`PATCH /api/users/{id}`). Every new request also sends a best-effort
-   Discord DM to each ID in `DISCORD_ADMIN_IDS` ("X requests access to the
-   server Y") so managers hear about it without watching the panel.
+   Discord DM to each ID in `DISCORD_ADMIN_IDS` (compact embed: user,
+   server, note) so managers hear about it without watching the panel. The
+   DM carries **Accept / Deny buttons**: clicking one applies the same flow as
+   the panel (guild request -> `view` override in that guild, generic
+   request -> global `view` merged into the existing set), marks the request
+   resolved exactly once, fires the same live-update events, and recolors
+   the embed with a one-line decision. A click on a stale copy (already
+   resolved from the panel or by another admin) re-marks that message with
+   the actual outcome instead of erroring. The buttons are custom-id
+   conventions handled by a raw interaction listener, so they keep working
+   after a bot restart.
 4. accounts created by stray logins can be removed entirely with `DELETE /api/users/{id}` (seeded admins are protected)
 
 **Local webapp panel (development):** the root `compose.yml` also runs the web panel (React + Vite, `web/`) behind **nginx**, the only published port of the platform: open `http://localhost:8080` and the UI talks to the API through the same origin (`/api/*` proxy, no CORS). Production exposure remains Cloudflare-only.
