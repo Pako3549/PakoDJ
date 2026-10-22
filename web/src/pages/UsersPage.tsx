@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, getToken } from "@/lib/api";
 import { useAccount, PERMISSIONS } from "@/lib/auth";
 import { useEscapeBack } from "@/lib/useEscapeBack";
 import { readCache, writeCache } from "@/lib/cache";
@@ -183,6 +183,34 @@ export default function UsersPage() {
   useEffect(() => {
     if (account) reload();
   }, [account, reload]);
+
+  // Admin queue live update (same no-polling approach as the request panel):
+  // the API broadcasts "requests" to manage_users streams on every newly
+  // created access request and this page reloads its data in place.
+  useEffect(() => {
+    const token = getToken();
+    if (!account || !token) return;
+    const ctrl = new AbortController();
+    (async () => {
+      const res = await fetch("/api/stream/updates", {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: ctrl.signal,
+      });
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return; // drop: a reload restores the stream
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() ?? "";
+        if (parts.some((c) => c.startsWith("event: requests"))) reload();
+      }
+    })().catch(() => { /* stream replaced or aborted on unmount */ });
+    return () => ctrl.abort();
+  }, [account?.id, reload]);
 
   if (loading || !account) return authError ? <ErrorBox message={authError} /> : null;
 

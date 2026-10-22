@@ -101,6 +101,19 @@ platform must serve a future web app with concurrent readers.
   so membership changes reach the panel without a re-login; failures fall
   back to the stored snapshot. Both the admin user detail response and the
   permission endpoints never return these token columns.
+- **Live grant push (SSE):** the request-access panel holds ONE
+  `GET /api/stream/updates` connection (Bearer-authenticated fetch reader,
+  15s keepalive comments, per-account capped queues, no polling).
+  `/api/stream/updates` fires `event: granted` the moment `PATCH
+  /api/access-requests/{id}` (or a direct `PATCH /api/users/{id}` /
+  `PUT /api/users/{id}/guilds/{gid}`) resolves for that account; the panel
+  verifies the effective state once (global permissions or the
+  visibility-filtered guild list for scoped-only grants) and reloads into
+  the dashboard. The admin Users page holds the same stream and receives
+  `event: requests` for every newly created access request (broadcast to
+  manage_users streams only, flagged at connect), refreshing the queue in
+  place. `X-Accel-Buffering: no` keeps nginx from buffering the stream; no
+  extra nginx configuration exists for it.
   Each created request DMs every env admin (best effort, 10 s timeout,
   silent failure) so the panel does not need watching; resolving a request
   clears the row immediately via the follow-up reload in the web UI.

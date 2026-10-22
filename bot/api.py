@@ -28,6 +28,7 @@ from typing import Literal, Optional
 from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Header, Request
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -188,6 +189,32 @@ def token_digest(token: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Live update fan-out (SSE): browsers hold ONE busy-waiting connection and get
+# pushed the "granted" event the moment an admin resolves their request — no
+# polling loops hammering the API.
+# ---------------------------------------------------------------------------
+# Stream registry keyed by account id; every entry carries the admin flag
+# snapshotted at connect time so broadcasts know who gets queue events.
+_stream_queues: dict[int, list[tuple[asyncio.Queue, bool]]] = {}
+
+
+def _notify_user(user_id: int, event: str, data: str) -> None:
+    """Fan-out to every open stream of one account; capped queues drop events
+    instead of growing (granted is the only signal the panel reacts to)."""
+    for q, _is_admin in _stream_queues.get(user_id, []):
+        if q.qsize() < q.maxsize:
+            q.put_nowait((event, data))
+
+
+def _notify_admins(event: str, data: str) -> None:
+    """Broadcast to the manage_users streams only (admin queue updates)."""
+    for entries in _stream_queues.values():
+        for q, is_admin in entries:
+            if is_admin and q.qsize() < q.maxsize:
+                q.put_nowait((event, data))
+
+
+# ---------------------------------------------------------------------------
 # Application factory (no circular imports: main.py injects its live pieces)
 # ---------------------------------------------------------------------------
 
@@ -273,6 +300,47 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         if authorization and authorization.startswith('Bearer '):
             await database.delete_session(token_digest(authorization[7:].strip()))
         return {"logged_out": True}
+
+    # ------------------------------------------------------------------
+    # Live updates (SSE): one held connection per browser session; the
+    # account table is the key: "granted" goes to its target, "requests"
+    # broadcasts to every manage_users stream (new access requests).
+    # ------------------------------------------------------------------
+    @app.get("/api/stream/updates")
+    async def stream_updates(user: dict = Depends(_require_account)):
+        async def gen():
+            queue: asyncio.Queue = asyncio.Queue(maxsize=16)
+            # Admin flag snapshot: manage_users streams also receive broadcast
+            # queue events (new access requests). Revocation mid-stream keeps
+            # pushing harmless events; the next list fetch 403s anyway.
+            is_admin = 'manage_users' in database.parse_permissions(user.get('permissions'))
+            _stream_queues.setdefault(user['id'], []).append((queue, is_admin))
+            try:
+                yield "event: connected\ndata: {}\n\n"
+                while True:
+                    try:
+                        event, data = await asyncio.wait_for(queue.get(), timeout=15)
+                        yield f"event: {event}\ndata: {data}\n\n"
+                    except asyncio.TimeoutError:
+                        # Keepalive write: doubles as disconnect detection (a
+                        # closed browser connection raises on the next yield).
+                        yield ": keepalive\n\n"
+            finally:
+                open_streams = _stream_queues.get(user['id'], [])
+                for entry in open_streams:
+                    if entry[0] is queue:
+                        open_streams.remove(entry)
+                        break
+                if not open_streams:
+                    _stream_queues.pop(user['id'], None)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            # X-Accel-Buffering: nginx streams this response instead of
+            # buffering it (no extra nginx config needed anywhere).
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ------------------------------------------------------------------
     # Discord OAuth login (inert until DISCORD_CLIENT_ID/SECRET + origin env)
@@ -504,6 +572,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         updated = await database.set_user_permissions(user_id, body.permissions)
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown user")
+        _notify_user(user_id, "granted", "true")
         return dict(updated)
 
     @app.delete("/api/users/{user_id}")
@@ -536,6 +605,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
             )
         get_guild(guild_id)  # 404 unless the bot is in that server
         updated = await database.set_user_guild_permissions(user_id, guild_id, body.permissions)
+        _notify_user(user_id, "granted", "true")
         return _row_dict(updated)
 
     @app.delete("/api/users/{user_id}/guilds/{guild_id}")
@@ -656,6 +726,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         except asyncio.TimeoutError:
             pass  # notification only; the request row is already stored
 
+        _notify_admins("requests", str(request_id))
         return {"created": True, "request_id": request_id}
 
     @app.patch("/api/access-requests/{request_id}")
@@ -663,6 +734,8 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         updated = await database.set_access_request_status(request_id, body.status)
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown request or invalid status")
+        if body.status == 'granted':
+            _notify_user(updated['user_id'], "granted", "true")
         return dict(updated)
 
     # ------------------------------------------------------------------

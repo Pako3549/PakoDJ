@@ -161,6 +161,7 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `GET` | `/api/auth/discord/callback` | — | Discord OAuth callback → session token |
 | `GET` | `/api/auth/me` | session | Current account (id, username, permissions) |
 | `POST` | `/api/auth/logout` | session | Revoke the session |
+| `GET` | `/api/stream/updates` | session | Live SSE updates for the logged account (`granted` event when an admin resolves a request or edits the account) |
 | `GET` | `/api/users` | `manage_users` | List accounts and their permissions |
 | `GET` | `/api/users/{id}` | `manage_users` | One account with its per-guild overrides |
 | `PATCH` | `/api/users/{id}` | `manage_users` | Replace the global permission set |
