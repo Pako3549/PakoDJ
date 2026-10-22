@@ -99,6 +99,9 @@ bash scripts/validate.sh
 An existing `bot/.env` belongs to the user and may contain real secrets:
 never overwrite, never delete, never print its contents. `scripts/validate.sh`
 is the only sanctioned way to touch it transiently for compose validation.
+Compose inspection must always be quiet (`docker compose config -q`): plain
+`compose config` prints resolved `env_file`/`.env` values and would leak
+live secrets into the console.
 
 All green + README/env.example updated = done. Runtime smoke tests need the
 user's real token: hand them the step list, do not fake "tested" results.

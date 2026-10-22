@@ -109,12 +109,19 @@ jobs:
         if [ -n "${{ secrets.DISCORD_ADMIN_IDS }}" ]; then
           echo "DISCORD_ADMIN_IDS=${{ secrets.DISCORD_ADMIN_IDS }}" >> bot/.env
         fi
-        # Optional: Cloudflare Tunnel token (needed only with --profile tunnel)
+        # Optional: Cloudflare Tunnel token. compose interpolates ${TUNNEL_TOKEN}
+        # from the project directory (deploy/), not from CWD: write accordingly.
         if [ -n "${{ secrets.TUNNEL_TOKEN }}" ]; then
-          echo "TUNNEL_TOKEN=${{ secrets.TUNNEL_TOKEN }}" >> .env
+          echo "TUNNEL_TOKEN=${{ secrets.TUNNEL_TOKEN }}" >> deploy/.env
         fi
 
     - name: Pull and start containers
       run: |
         docker compose -f deploy/compose.yml pull
-        docker compose -f deploy/compose.yml up -d --remove-orphans
+        # The tunnel profile is activated automatically when the token exists:
+        # no secret -> no cloudflared service (nothing exposed by default).
+        if [ -n "${{ secrets.TUNNEL_TOKEN }}" ]; then
+          docker compose -f deploy/compose.yml --profile tunnel up -d --remove-orphans
+        else
+          docker compose -f deploy/compose.yml up -d --remove-orphans
+        fi
