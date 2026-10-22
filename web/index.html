@@ -2,16 +2,23 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="icon" type="image/png" href="/bot.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Discord music bot control panel" />
     <title>PakoDJ</title>
     <script>
-      // Theme resolution per docs/style.md: localStorage -> prefers-color-scheme -> dark.
+      // Theme resolves before anything renders (no white flash in dark mode):
+      // localStorage -> prefers-color-scheme -> dark. The background/color are
+      // painted inline so they hold until the CSS bundle arrives; body covers
+      // the viewport with its own Tailwind class once styles are live.
       (function () {
         var stored = localStorage.getItem('theme');
         var dark = stored ? stored === 'dark' : !window.matchMedia('(prefers-color-scheme: light)').matches;
         document.documentElement.classList.toggle('dark', dark);
+        document.documentElement.style.cssText =
+          'color-scheme:' + (dark ? 'dark' : 'light') + ';' +
+          'background:' + (dark ? '#111318' : '#f3f4f6') + ';' +
+          'color:' + (dark ? '#f3f4f6' : '#111827') + ';';
       })();
     </script>
   </head>

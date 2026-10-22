@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import { useAccount } from "@/lib/auth";
+import { useEscapeBack } from "@/lib/useEscapeBack";
 import ThemeToggle from "@/components/ThemeToggle";
 import ErrorBox from "@/components/ErrorBox";
 
@@ -14,6 +15,7 @@ type QueueItem = {
 
 type GuildStatus = {
   guild_id: string;
+  guild_name: string;
   voice_connected: boolean;
   playing: boolean;
   paused: boolean;
@@ -34,9 +36,23 @@ type SearchHit = {
 
 export default function GuildPage() {
   const { guildId } = useParams<{ guildId: string }>();
+  const location = useLocation();
   const { account, loading, error: authError } = useAccount();
-  const isAdmin = account?.role === "admin";
+  // Granular gating: each control group maps to its own permission key,
+  // resolved against the global set (the API applies per-guild overrides).
+  const canPlayback = account?.permissions.includes("playback") ?? false;
+  const canQueue = account?.permissions.includes("queue") ?? false;
+  const canQueueManage = account?.permissions.includes("queue_manage") ?? false;
+  const canSearch = account?.permissions.includes("search") ?? false;
+  // The header has a back arrow: Escape goes back to the dashboard.
+  useEscapeBack(Boolean(guildId));
 
+  // The guild name renders from the very first frame: it comes from the
+  // dashboard link state (same-session navigation) or, on direct loads,
+  // from the lightning-fast guilds list instead of the status endpoint.
+  const [guildName, setGuildName] = useState<string>(
+    (location.state as { name?: string } | null)?.name ?? ""
+  );
   const [status, setStatus] = useState<GuildStatus | null>(null);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -61,8 +77,25 @@ export default function GuildPage() {
 
   useEffect(() => {
     if (!account) return;
+    if (guildId) {
+      // Name refresh for direct URL loads / refreshes (no link state).
+      apiFetch<{ id: string; name: string }[]>("/api/guilds")
+        .then((gs) => {
+          const g = gs.find((x) => x.id === guildId);
+          if (g) setGuildName(g.name);
+        })
+        .catch(() => {});
+    }
     reloadData();
   }, [account, guildId, reloadData]);
+
+  // Tab title tracks the guild name; reset to the app title on unmount.
+  useEffect(() => {
+    if (guildName) document.title = `${guildName} · PakoDJ`;
+    return () => {
+      document.title = "PakoDJ";
+    };
+  }, [guildName]);
 
   useEffect(() => {
     setPreviewing(null);
@@ -118,7 +151,7 @@ export default function GuildPage() {
             ←
           </Link>
           <div>
-            <h1 className="text-lg font-semibold">Guild {guildId}</h1>
+            <h1 className="text-lg font-semibold">{guildName || "Guild"}</h1>
             <p className="text-xs text-muted truncate max-w-[420px]">
               {status?.now_playing?.title ?? "nothing playing"}
               {status?.paused ? " (paused)" : ""}
@@ -126,22 +159,35 @@ export default function GuildPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 text-xs text-muted">
+            {account.avatar_url && (
+              <img src={account.avatar_url} alt="" className="w-6 h-6 rounded-full" />
+            )}
+            <span className="hidden sm:inline">{account.username}</span>
+          </div>
           <span className={`w-2.5 h-2.5 rounded-full ${status?.playing ? "bg-accent" : "bg-muted"}`} />
-          {isAdmin && (
+          {(canPlayback || canSearch || canQueue) && (
             <div className="flex items-center gap-2">
-              {status?.paused ? (
+              {canPlayback && (status?.paused ? (
                 <button onClick={() => admin(`/api/guilds/${guildId}/resume`, { method: "POST" })}
                   className="px-3 py-2 rounded-lg bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition">Resume</button>
               ) : (
                 <button onClick={() => admin(`/api/guilds/${guildId}/pause`, { method: "POST" })}
-                  className="px-3 py-2 rounded-lg bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition">Pause</button>
+                  disabled={!status?.playing}
+                  className="px-3 py-2 rounded-lg bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition disabled:opacity-50">Pause</button>
+              ))}
+              {canPlayback && (
+                <button onClick={() => admin(`/api/guilds/${guildId}/skip`, { method: "POST", body: JSON.stringify({ all: false }) })}
+                  className="px-3 py-2 rounded-lg bg-card border border-border text-xs text-secondary hover:text-primary transition">Skip</button>
               )}
-              <button onClick={() => admin(`/api/guilds/${guildId}/skip`, { method: "POST", body: JSON.stringify({ all: false }) })}
-                className="px-3 py-2 rounded-lg bg-card border border-border text-xs text-secondary hover:text-primary transition">Skip</button>
-              <button onClick={() => admin(`/api/guilds/${guildId}/skip`, { method: "POST", body: JSON.stringify({ all: true }) })}
-                className="px-3 py-2 rounded-lg bg-card border border-border text-xs text-secondary hover:text-primary transition">Skip all</button>
-              <button onClick={() => admin(`/api/guilds/${guildId}/stop`, { method: "POST" })}
-                className="px-3 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs font-medium hover:bg-red-500/20 transition">Stop</button>
+              {canPlayback && (
+                <button onClick={() => admin(`/api/guilds/${guildId}/skip`, { method: "POST", body: JSON.stringify({ all: true }) })}
+                  className="px-3 py-2 rounded-lg bg-card border border-border text-xs text-secondary hover:text-primary transition">Skip all</button>
+              )}
+              {canPlayback && (
+                <button onClick={() => admin(`/api/guilds/${guildId}/stop`, { method: "POST" })}
+                  className="px-3 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs font-medium hover:bg-red-500/20 transition">Stop</button>
+              )}
             </div>
           )}
           <ThemeToggle />
@@ -150,7 +196,7 @@ export default function GuildPage() {
 
       {error && <p className="text-xs text-red-400 mb-4">{error}</p>}
 
-      {isAdmin && (
+      {(canQueue || canSearch) && (
         <section className="bg-card border border-border rounded-xl p-4 mb-6">
           <h2 className="text-sm font-medium mb-3">Add music</h2>
           <form onSubmit={runSearch} className="flex gap-2 mb-3">
@@ -158,11 +204,12 @@ export default function GuildPage() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search a track or paste a YouTube / SoundCloud URL"
-              className="flex-1 px-3 py-2 rounded-lg bg-surface border border-border text-sm text-primary placeholder:text-muted focus:outline-none focus:border-accent/60"
+              disabled={!canSearch && !canQueue}
+              placeholder={canSearch ? "Search a track or paste a YouTube / SoundCloud URL" : "Paste a URL to play or queue"}
+              className="flex-1 px-3 py-2 rounded-lg bg-surface border border-border text-sm text-primary placeholder:text-muted focus:outline-none focus:border-accent/60 disabled:opacity-50"
             />
-            <button type="submit" className="px-4 py-2 rounded-lg bg-accent text-inverse text-sm font-medium hover:bg-accent/90 transition">
-              Search / Play
+            <button type="submit" disabled={!canSearch && !canQueue} className="px-4 py-2 rounded-lg bg-accent text-inverse text-sm font-medium hover:bg-accent/90 transition disabled:opacity-50">
+              {canSearch ? "Search / Play" : "Play / Queue"}
             </button>
           </form>
           {hits.length > 0 && (
@@ -178,10 +225,14 @@ export default function GuildPage() {
                     className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition">
                     {previewing === hit.preview ? "Stop" : "Preview"}
                   </button>
-                  <button onClick={() => enqueueHit(hit)}
-                    className="px-3 py-1 rounded bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition">Queue</button>
-                  <button onClick={() => enqueueHit(hit, false)}
-                    className="px-3 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition">Play now</button>
+                  {canQueue && (
+                    <button onClick={() => enqueueHit(hit)}
+                      className="px-3 py-1 rounded bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition">Queue</button>
+                  )}
+                  {canQueue && (
+                    <button onClick={() => enqueueHit(hit, false)}
+                      className="px-3 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition">Play now</button>
+                  )}
                 </div>
               ))}
             </div>
@@ -195,7 +246,7 @@ export default function GuildPage() {
             <h2 className="text-sm font-medium">Queue</h2>
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted">{queue.length}</span>
-              {isAdmin && queue.length > 0 && (
+              {canQueueManage && queue.length > 0 && (
                 <button onClick={() => admin(`/api/guilds/${guildId}/queue`, { method: "DELETE" })}
                   className="px-2 py-1 rounded bg-red-500/10 text-red-400 text-xs hover:bg-red-500/20 transition">Clear</button>
               )}
@@ -207,7 +258,7 @@ export default function GuildPage() {
               <div key={`${item.id}-${item.position}`} className="flex items-center gap-2 bg-surface border border-border rounded-lg p-2">
                 <span className="text-xs text-muted w-6 text-right">{index + 1}</span>
                 <p className="flex-1 text-sm text-primary truncate">{item.title}</p>
-                {isAdmin && (
+                {canQueueManage && (
                   <div className="flex items-center gap-1">
                     {index > 0 && (
                       <button onClick={() => admin(`/api/guilds/${guildId}/queue/${item.id}`, { method: "PATCH", body: JSON.stringify({ position: item.position - 1 }) })}

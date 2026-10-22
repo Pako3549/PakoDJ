@@ -52,6 +52,7 @@ export default function LoginPage() {
   return (
     <main className="max-w-md mx-auto px-4 py-16">
       <div className="bg-card border border-border rounded-xl p-6">
+        <img src="/bot.png" alt="PakoDJ" className="w-12 h-12 rounded-xl mb-3" />
         <h1 className="text-lg font-semibold mb-1">PakoDJ</h1>
         <p className="text-xs text-muted mb-6">Sign in with your Discord account</p>
 

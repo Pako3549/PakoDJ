@@ -14,6 +14,9 @@ export default function ThemeToggle() {
     const next = !dark;
     setDark(next);
     document.documentElement.classList.toggle("dark", next);
+    // CSS is live at this point (body bg via Tailwind): drop the pre-CSS
+    // inline paint so the html background follows the theme from vars.
+    document.documentElement.style.background = "";
     localStorage.setItem("theme", next ? "dark" : "light");
   }
 

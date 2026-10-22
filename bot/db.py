@@ -5,6 +5,7 @@ PostgreSQL so they survive bot restarts and can later be shared with a
 web platform. Every database access goes through this module (asyncpg
 pool); no raw SQL is kept in main.py.
 """
+import json
 import os
 
 import asyncpg
@@ -79,12 +80,30 @@ CREATE TABLE IF NOT EXISTS users (
     seed          BOOLEAN NOT NULL DEFAULT FALSE,
     guild_ids     TEXT NOT NULL DEFAULT '',   -- JSON list: guilds shared with the bot, snapshot updated at each login
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    discord_id    TEXT
+    discord_id    TEXT,
+    avatar_hash   TEXT                    -- Discord avatar hash (avatar CDN URL is rebuilt per request)
 );
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'nobody';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS seed BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS discord_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS guild_ids TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_hash TEXT;
+-- Granular permissions: JSON array of permission keys over users.
+-- Legacy coarse roles are migrated once on load (guard = untouched default).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions TEXT NOT NULL DEFAULT '["view"]';
+UPDATE users SET permissions =
+  '["view","search","queue","queue_manage","playback","manage_users"]'
+  WHERE role = 'admin' AND permissions = '["view"]';
+UPDATE users SET permissions = '[]'
+  WHERE role = 'nobody' AND permissions = '["view"]';
+-- Per-guild permission overrides: when a row exists for (user, guild) it
+-- REPLACES the user's global permission set inside that guild.
+CREATE TABLE IF NOT EXISTS user_guild_permissions (
+    user_id     INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    guild_id    BIGINT NOT NULL,
+    permissions TEXT NOT NULL,               -- JSON array of permission keys
+    PRIMARY KEY (user_id, guild_id)
+);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord ON users (discord_id);
 
 -- Access requests: 'nobody' users ask for webapp access on specific shared
@@ -340,38 +359,58 @@ async def list_now_playing():
 # Auth accounts & sessions (web API)
 # ---------------------------------------------------------------------------
 
-ROLES = ('nobody', 'viewer', 'admin')
+ROLES = ('nobody', 'viewer', 'admin')  # legacy coarse roles, kept for the migration above
+
+# Granular permission keys (JSON arrays on users and user_guild_permissions).
+PERMISSIONS = ('view', 'search', 'queue', 'queue_manage', 'playback', 'manage_users')
+ALL_PERMISSIONS_JSON = '["view","search","queue","queue_manage","playback","manage_users"]'
 
 
-async def upsert_discord_user(discord_id, username, env_role):
+def normalize_permissions(raw):
+    """Validate/dedupe a permission list; unknown keys are dropped."""
+    received = raw if isinstance(raw, (list, tuple)) else []
+    return [p for p in PERMISSIONS if p in received]
+
+
+def parse_permissions(raw):
+    """Decode the stored JSON permission array into a validated list."""
+    try:
+        return normalize_permissions(json.loads(raw))
+    except (ValueError, TypeError):
+        return []
+
+
+async def upsert_discord_user(discord_id, username, avatar_hash, env_role):
     """Create or update the Discord-linked account; the Discord ID is the
-    identity, username is the visible Discord display name.
+    identity, username is the visible Discord display name. avatar_hash is the
+    raw Discord avatar hash (used to rebuild the CDN URL for the web panel).
     env_role is 'admin' for discord_ids listed in DISCORD_ADMIN_IDS, else
     'nobody'. Rules on login:
-    - env admin -> always role 'admin', seed=TRUE (env owns the account)
+    - env admin -> all permissions, seed=TRUE (env owns the account)
     - non env member previously seeded (removed from DISCORD_ADMIN_IDS)
-      -> demoted to 'nobody' (env revocation, takes effect at this login)
-    - non seeded user -> granted role is preserved."""
+      -> permissions wiped to [] (env revocation, takes effect at this login)
+    - non seeded user -> granted permissions are preserved."""
     seed = env_role == 'admin'
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetchrow(
-            "INSERT INTO users (username, discord_id, password_hash, role, seed) "
-            "VALUES ($2, $1, '', $3, $4) "
+            "INSERT INTO users (username, discord_id, avatar_hash, password_hash, permissions, seed) "
+            "VALUES ($2, $1, $3, '', $4, $5) "
             "ON CONFLICT (discord_id) DO UPDATE SET "
-            "username = EXCLUDED.username, seed = EXCLUDED.seed, "
-            "role = CASE "
-            "  WHEN EXCLUDED.seed THEN 'admin' "
-            "  WHEN users.seed THEN 'nobody' "
-            "  ELSE users.role END "
-            "RETURNING id, username, role, seed",
-            discord_id, username, env_role, seed
+            "username = EXCLUDED.username, avatar_hash = EXCLUDED.avatar_hash, "
+            "seed = EXCLUDED.seed, "
+            "permissions = CASE "
+            "  WHEN EXCLUDED.seed THEN $4 "
+            "  WHEN users.seed THEN '[]' "
+            "  ELSE users.permissions END "
+            "RETURNING id, username, permissions, seed",
+            discord_id, username, avatar_hash, ALL_PERMISSIONS_JSON, seed
         )
 
 
 async def list_users():
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetch(
-            "SELECT id, username, created_at, role, seed, discord_id FROM users "
+            "SELECT id, username, created_at, role, seed, discord_id, avatar_hash, permissions FROM users "
             "ORDER BY created_at"
         )
 
@@ -379,7 +418,7 @@ async def list_users():
 async def get_user_by_id(user_id):
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetchrow(
-            "SELECT id, username, role, seed, guild_ids, discord_id FROM users WHERE id = $1",
+            "SELECT id, username, role, seed, guild_ids, discord_id, permissions FROM users WHERE id = $1",
             user_id
         )
 
@@ -430,17 +469,63 @@ async def set_access_request_status(request_id, status):
         )
 
 
-async def set_user_role(user_id, role):
-    """Change a granted user's role; returns the updated row, None if
-    unknown id. Seeded accounts are never updated through this call."""
-    if role not in ROLES:
-        return None
+async def set_user_permissions(user_id, permissions):
+    """Replace a user's global permission set. Seed accounts (owned by
+    DISCORD_ADMIN_IDS) are untouchable; returns the updated row or None
+    (unknown user / seeded account)."""
+    wanted = normalize_permissions(permissions)
+    payload = json.dumps(wanted) if wanted else '[]'
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetchrow(
-            "UPDATE users SET role = $2 WHERE id = $1 AND seed = FALSE "
-            "RETURNING id, username, role",
-            user_id, role
+            "UPDATE users SET permissions = $2 WHERE id = $1 AND seed = FALSE "
+            "RETURNING id, username, permissions",
+            user_id, payload
         )
+
+
+async def get_user_guild_permissions(user_id, guild_id):
+    """Per-guild override row for (user, guild); None when no override."""
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT permissions FROM user_guild_permissions "
+            "WHERE user_id = $1 AND guild_id = $2",
+            user_id, guild_id
+        )
+
+
+async def list_user_guild_permissions(user_id):
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetch(
+            "SELECT guild_id, permissions FROM user_guild_permissions "
+            "WHERE user_id = $1 ORDER BY guild_id",
+            user_id
+        )
+
+
+async def set_user_guild_permissions(user_id, guild_id, permissions):
+    """Upsert the per-guild override; it replaces the global set in-guild."""
+    wanted = normalize_permissions(permissions)
+    payload = json.dumps(wanted) if wanted else '[]'
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetchrow(
+            "INSERT INTO user_guild_permissions (user_id, guild_id, permissions) "
+            "VALUES ($1, $2, $3) "
+            "ON CONFLICT (user_id, guild_id) DO UPDATE SET permissions = EXCLUDED.permissions "
+            "RETURNING guild_id, permissions",
+            user_id, guild_id, payload
+        )
+
+
+async def delete_user_guild_permissions(user_id, guild_id):
+    """Remove the per-guild override; the global set applies again.
+    Returns True when a row was actually deleted."""
+    async with _pool_or_raise().acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM user_guild_permissions WHERE user_id = $1 AND guild_id = $2",
+            user_id, guild_id
+        )
+        # asyncpg returns the "DELETE <count>" status string
+        return result.split()[-1] != '0'
 
 
 async def create_session(user_id, token_hash, expires_at):
@@ -455,7 +540,7 @@ async def get_session_user(token_hash):
     """Resolve a session token hash to its user; None if unknown/expired."""
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetchrow(
-            "SELECT u.id, u.username, u.role FROM api_sessions s "
+            "SELECT u.id, u.username, u.permissions, u.avatar_hash, u.discord_id FROM api_sessions s "
             "JOIN users u ON u.id = s.user_id "
             "WHERE s.token_hash = $1 AND s.expires_at > now()",
             token_hash

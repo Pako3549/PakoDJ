@@ -132,16 +132,19 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 
 **Setup requirements:** set `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` and `API_PUBLIC_ORIGIN` (e.g. `https://api.yourdomain.com`) in `bot/.env`, and register the redirect URI `${API_PUBLIC_ORIGIN}/api/auth/discord/callback` in your Discord application (discord.com/developers → OAuth2). Users must share a server with the bot to log in. Discord IDs in `DISCORD_ADMIN_IDS=<id>,...` are always admin — put your own ID there and your account is the owner-admin from the first login. Until those env vars are set, the Discord endpoints answer `503` and every other endpoint answers `401` (no anonymous surface).
 
-**Roles:** every login auto-creates the account, but with the `nobody` role (no API surface: only `/api/auth/me` and the access-request endpoints). The owner-admin then grants access with the user-management endpoints:
-- `GET /api/users` — list accounts (id, username, role, seed flag, created_at, discord_id)
-- `PATCH /api/users/{id}` `{"role": "viewer"|"admin"|"nobody"}` — change a role
+**Granular permissions:** every login auto-creates the account without API surface (empty permission set: only `/api/auth/me` and the access-request endpoints). Six permission keys, checked per endpoint: `view` (read endpoints), `search` (track metadata), `queue` (play/enqueue), `queue_manage` (remove/reorder/clear the queue), `playback` (pause/resume/skip/stop), `manage_users` (accounts + access requests). Users with `manage_users` manage the sets:
+- `GET /api/users` — list accounts (id, username, permissions, seed flag, created_at, discord_id)
+- `PATCH /api/users/{id}` `{"permissions": [...]}` — replace the global set
+- `GET /api/users/{id}` — one account with its per-guild overrides
+- `PUT /api/users/{id}/guilds/{guild_id}` `{"permissions": [...]}` — per-guild override (replaces the global set inside that guild only)
+- `DELETE /api/users/{id}/guilds/{guild_id}` — drop the override (the global set applies again)
 
-`viewer` gets read-only access; `admin` gets playback control and user management. **Seeded admins are untouchable:** accounts whose Discord ID is in `DISCORD_ADMIN_IDS` carry the `seed` flag and are exclusively owned by the env — no API call and no other admin can ever change or demote them (`403`), and they are re-forced to `admin` at every login. Removing an ID from `DISCORD_ADMIN_IDS` revokes the seeded admin (that account falls back to `nobody` and becomes changeable at its next login). A role granted by an admin to a normal account survives logins.
+**Seeded admins are untouchable:** accounts whose Discord ID is in `DISCORD_ADMIN_IDS` carry the `seed` flag, always hold the full permission set, and are exclusively owned by the env — no API call and no other user can ever change or demote them (`403`). Removing an ID from `DISCORD_ADMIN_IDS` wipes that account's permissions at its next login. Granted permissions on normal accounts survive logins.
 
-**Access requests (webapp onboarding):** a `nobody` user asks for access directly from the webapp:
+**Access requests (webapp onboarding):** an account without `view` asks for access directly from the webapp:
 1. `GET /api/access/guilds` — servers where BOTH the user and the bot are (snapshot refreshed at every login)
 2. `POST /api/access-requests {"guild_id": ..., "message": "why I want access"}` — one pending request per guild, validated against that same list
-3. admins see the queue with `GET /api/access-requests` (username, guild, message) and resolve each one with `PATCH /api/access-requests/{id} {"status": "granted"|"denied"}` — granting the actual role is a separate `PATCH /api/users/{id}` call
+3. users with `manage_users` see the queue with `GET /api/access-requests` (username, guild, message) and resolve each one with `PATCH /api/access-requests/{id} {"status": "granted"|"denied"}` — granting the actual permission set is a separate `PATCH /api/users/{id}` call
 
 **Local webapp panel (development):** the root `compose.yml` also runs the web panel (React + Vite, `web/`) behind **nginx**, the only published port of the platform: open `http://localhost:8080` and the UI talks to the API through the same origin (`/api/*` proxy, no CORS). Production exposure remains Cloudflare-only.
 
@@ -153,27 +156,32 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | ------ | -------- | ---- | ----------- |
 | `GET` | `/api/auth/discord/start` | — | Returns the Discord OAuth authorize URL |
 | `GET` | `/api/auth/discord/callback` | — | Discord OAuth callback → session token |
-| `GET` | `/api/auth/me` | session | Current account (id, username, role) |
+| `GET` | `/api/auth/me` | session | Current account (id, username, permissions) |
 | `POST` | `/api/auth/logout` | session | Revoke the session |
-| `GET` | `/api/users` | 🛠️ admin | List accounts and their roles |
-| `PATCH` | `/api/users/{id}` | 🛠️ admin | Change a role (`nobody`/`viewer`/`admin`) |
+| `GET` | `/api/users` | `manage_users` | List accounts and their permissions |
+| `GET` | `/api/users/{id}` | `manage_users` | One account with its per-guild overrides |
+| `PATCH` | `/api/users/{id}` | `manage_users` | Replace the global permission set |
+| `PUT` | `/api/users/{id}/guilds/{guild_id}` | `manage_users` | Set the per-guild permission override |
+| `DELETE` | `/api/users/{id}/guilds/{guild_id}` | `manage_users` | Drop the per-guild override |
 | `GET` | `/api/access/guilds` | session | Guilds shared between the account and the bot |
-| `GET` | `/api/access-requests` | 🛠️ admin | Pending access requests (panel queue) |
+| `GET` | `/api/access-requests` | `manage_users` | Pending access requests (panel queue) |
 | `POST` | `/api/access-requests` | session | Submit an access request for a shared guild |
-| `PATCH` | `/api/access-requests/{id}` | 🛠️ admin | Resolve a request (`granted`/`denied`) |
-| `GET` | `/api/guilds` | viewer+ | Servers the bot is in |
-| `GET` | `/api/guilds/{id}/status` | viewer+ | Now playing + queue count + voice state |
-| `GET` | `/api/now-playing` | viewer+ | What every connected server is playing |
-| `GET` | `/api/guilds/{id}/queue` | viewer+ | Queue of a server |
-| `GET` | `/api/search?q=` | viewer+ | Track metadata (free Deezer public API, server-cached) |
-| `POST` | `/api/guilds/{id}/queue` | 🛠️ admin | `{ "query": "...", "position": 0? }` — enqueue (append or at a position) |
-| `PATCH` | `/api/guilds/{id}/queue/{item_id}` | 🛠️ admin | `{ "position": n }` — reorder the queue |
-| `DELETE` | `/api/guilds/{id}/queue/{item_id}` | 🛠️ admin | Remove one queued item |
-| `DELETE` | `/api/guilds/{id}/queue` | 🛠️ admin | Clear the queue |
-| `GET` | `/api/guilds/{id}/history` | viewer+ | History of a server |
-| `POST` | `/api/guilds/{id}/play` | 🛠️ admin | `{ "query": "..." }` — play or enqueue |
-| `POST` | `/api/guilds/{id}/skip` | 🛠️ admin | `{ "all": false }` — skip / skip all |
-| `POST` | `/api/guilds/{id}/pause` · `/resume` · `/stop` | 🛠️ admin | Playback controls |
+| `PATCH` | `/api/access-requests/{id}` | `manage_users` | Resolve a request (`granted`/`denied`) |
+| `GET` | `/api/guilds` | `view` | Servers the bot is in |
+| `GET` | `/api/guilds/{id}/status` | `view` | Now playing + queue count + voice state |
+| `GET` | `/api/now-playing` | `view` | What every connected server is playing |
+| `GET` | `/api/guilds/{id}/queue` | `view` | Queue of a server |
+| `GET` | `/api/search?q=` | `search` | Track metadata (free Deezer public API, server-cached) |
+| `POST` | `/api/guilds/{id}/queue` | `queue` | `{ "query": "...", "position": 0? }` — enqueue (append or at a position) |
+| `PATCH` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | `{ "position": n }` — reorder the queue |
+| `DELETE` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | Remove one queued item |
+| `DELETE` | `/api/guilds/{id}/queue` | `queue_manage` | Clear the queue |
+| `GET` | `/api/guilds/{id}/history` | `view` | History of a server |
+| `POST` | `/api/guilds/{id}/play` | `queue` | `{ "query": "..." }` — play or enqueue |
+| `POST` | `/api/guilds/{id}/skip` | `playback` | `{ "all": false }` — skip / skip all |
+| `POST` | `/api/guilds/{id}/pause` · `/resume` · `/stop` | `playback` | Playback controls |
+
+An endpoint whose path contains a guild id resolves the caller's per-guild override (when present) instead of the global set.
 
 Optional: set `API_CORS_ORIGINS=https://your-webapp.example` in `bot/.env` if a browser-based frontend will call the API cross-origin (server-to-server clients don't need it).
 

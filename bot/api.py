@@ -6,15 +6,13 @@ can read live voice state and invoke playback directly.
 SECURITY:
 - Login is Discord OAuth only: GET /api/auth/discord/start, complete the
   flow, then use the returned session_token as `Authorization: Bearer <token>`.
-- Accounts get a role: nobody (login only, no API surface), viewer
-  (read-only) or admin (playback control + user management). Admins come
-  from DISCORD_ADMIN_IDS at login; admins grant other roles via the
-  /api/users endpoints.
+- Granular permissions: accounts carry a permission set (view, search, queue,
+  queue_manage, playback, manage_users), possibly overridden per guild
+  (table user_guild_permissions). Full set for DISCORD_ADMIN_IDS at login;
+  admins manage other accounts' permissions via the /api/users endpoints.
 - Sessions are server side (api_sessions table), only their SHA-256 is
   stored, they expire (API_SESSION_TTL_DAYS, default 7) and can be revoked
   per user by deleting rows — no shared static secret anywhere.
-- Future roles/permissions plug into the same dependencies without touching
-  the endpoint surface.
 
 No port is published by default: reachability is decided by the compose
 file, nothing is exposed to the internet.
@@ -52,8 +50,8 @@ class SkipRequest(BaseModel):
     all: bool = False
 
 
-class UserRoleRequest(BaseModel):
-    role: Literal['nobody', 'viewer', 'admin']
+class PermissionsRequest(BaseModel):
+    permissions: list[Literal['view', 'search', 'queue', 'queue_manage', 'playback', 'manage_users']] = Field(max_length=6)
 
 
 class AccessRequestCreate(BaseModel):
@@ -94,6 +92,17 @@ def discord_login_configured() -> bool:
     return bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and API_PUBLIC_ORIGIN)
 
 
+def avatar_url(discord_id, avatar_hash):
+    """Discord CDN URL for the account avatar; the generic placeholder for
+    accounts logged in before avatar storage (hash refreshed at next login)."""
+    if not discord_id:
+        return None
+    if avatar_hash:
+        ext = 'gif' if avatar_hash.startswith('a_') else 'png'
+        return f"https://cdn.discordapp.com/avatars/{discord_id}/{avatar_hash}.{ext}?size=64"
+    return "https://cdn.discordapp.com/embed/avatars/0.png"
+
+
 # ---------------------------------------------------------------------------
 # Session primitives
 # ---------------------------------------------------------------------------
@@ -125,18 +134,24 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
 
     app = FastAPI(title="PakoDJ API", version="1.0", dependencies=[Depends(_require_account)])
 
-    # Read endpoints require at least the viewer role ('nobody' accounts exist
-    # because login auto-creates the account; an admin must grant access).
-    def _require_viewer(user: dict = Depends(_require_account)) -> dict:
-        if user['role'] == 'nobody':
-            raise HTTPException(status_code=403, detail="Account without access yet (ask an admin)")
-        return user
+    # Granular permission gate. The global permission set applies everywhere;
+    # a per-guild override row (user_guild_permissions) replaces it inside
+    # that specific guild. Endpoints whose path carries guild_id are scoped.
+    async def _effective_permissions(user: dict, guild_id=None) -> list:
+        guild_key = int(guild_id) if guild_id is not None else None
+        if guild_key is not None:
+            override = await database.get_user_guild_permissions(user['id'], guild_key)
+            if override:
+                return database.parse_permissions(override['permissions'])
+        return database.parse_permissions(user.get('permissions'))
 
-    # Playback control and user management additionally require admin.
-    def _require_admin(user: dict = Depends(_require_viewer)) -> dict:
-        if user['role'] != 'admin':
-            raise HTTPException(status_code=403, detail="Admin account required")
-        return user
+    def _require_permission(permission: str):
+        async def dep(request: Request, user: dict = Depends(_require_account)) -> dict:
+            perms = await _effective_permissions(user, request.path_params.get('guild_id'))
+            if permission not in perms:
+                raise HTTPException(status_code=403, detail=f"Missing '{permission}' permission")
+            return {**user, 'permissions': perms}
+        return dep
 
     # Browser CORS is opt-in only (server-to-server callers don't need it)
     cors_origins = [o.strip() for o in os.getenv('API_CORS_ORIGINS', '').split(',') if o.strip()]
@@ -163,7 +178,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
             "session_token": token,
             "expires_at": expires_at.isoformat(),
             "username": user['username'],
-            "role": user['role'],
+            "permissions": database.parse_permissions(user['permissions']),
         }
 
     # ------------------------------------------------------------------
@@ -171,7 +186,12 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
     # ------------------------------------------------------------------
     @app.get("/api/auth/me")
     async def me(user: dict = Depends(_require_account)):
-        return {"id": user['id'], "username": user['username'], "role": user['role']}
+        return {
+            "id": user['id'],
+            "username": user['username'],
+            "permissions": database.parse_permissions(user.get('permissions')),
+            "avatar_url": avatar_url(user.get('discord_id'), user.get('avatar_hash')),
+        }
 
     @app.post("/api/auth/logout")
     async def logout(user: dict = Depends(_require_account), authorization: Optional[str] = Header(None)):
@@ -244,7 +264,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         discord_id = str(me['id'])
         env_role = 'admin' if discord_id in DISCORD_ADMIN_IDS else 'nobody'
         user = await database.upsert_discord_user(
-            discord_id, me.get('global_name') or me['username'], env_role
+            discord_id, me.get('global_name') or me['username'], me.get('avatar'), env_role
         )
         # Snapshot the guilds shared between this user and the bot; the access
         # request flow (GET /api/access/guilds, POST /api/access-requests) reads it.
@@ -260,7 +280,6 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
             fragment = urlencode({
                 'session_token': payload['session_token'],
                 'username': payload['username'],
-                'role': payload['role'],
             })
             return RedirectResponse(
                 url=f"/auth/callback#{fragment}",
@@ -285,18 +304,19 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"status": "ok", "guilds": len(bot.guilds)}
 
     @app.get("/api/guilds")
-    async def guilds(user: dict = Depends(_require_viewer)):
+    async def guilds(user: dict = Depends(_require_permission('view'))):
         # Discord snowflakes exceed JS number precision: always serialize as strings
         return [{"id": str(g.id), "name": g.name} for g in bot.guilds]
 
     @app.get("/api/guilds/{guild_id}/status")
-    async def status(guild_id: int, user: dict = Depends(_require_viewer)):
+    async def status(guild_id: int, user: dict = Depends(_require_permission('view'))):
         guild = get_guild(guild_id)
         vc = get_voice(guild)
         now = await database.list_now_playing()
         row = next((r for r in now if r['guild_id'] == guild_id), None)
         return {
             "guild_id": str(guild_id),
+            "guild_name": guild.name,
             "voice_connected": bool(vc and vc.is_connected()),
             "playing": bool(vc and vc.is_playing()),
             "paused": bool(vc and vc.is_paused()),
@@ -309,19 +329,19 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
     # Data
     # ------------------------------------------------------------------
     @app.get("/api/guilds/{guild_id}/queue")
-    async def queue(guild_id: int, user: dict = Depends(_require_viewer)):
+    async def queue(guild_id: int, user: dict = Depends(_require_permission('view'))):
         get_guild(guild_id)
         rows = await database.list_queue(guild_id, limit=200)
         return [_row_dict(r) for r in rows]
 
     @app.get("/api/guilds/{guild_id}/history")
-    async def history(guild_id: int, user: dict = Depends(_require_viewer)):
+    async def history(guild_id: int, user: dict = Depends(_require_permission('view'))):
         get_guild(guild_id)
         rows = await database.list_history(guild_id, limit=100)
         return [_row_dict(r) for r in rows]
 
     @app.get("/api/now-playing")
-    async def now_playing(user: dict = Depends(_require_viewer)):
+    async def now_playing(user: dict = Depends(_require_permission('view'))):
         rows = await database.list_now_playing()
         return [_row_dict(r) for r in rows]
 
@@ -329,12 +349,36 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
     # User management (admin: grant webapp access after first Discord login)
     # ------------------------------------------------------------------
     @app.get("/api/users")
-    async def users(admin: dict = Depends(_require_admin)):
+    async def users(admin: dict = Depends(_require_permission('manage_users'))):
         rows = await database.list_users()
-        return [dict(r) for r in rows]
+        return [
+            {
+                **dict(r),
+                "permissions": database.parse_permissions(r['permissions']),
+                "avatar_url": avatar_url(r['discord_id'], r.get('avatar_hash')),
+            }
+            for r in rows
+        ]
+
+    @app.get("/api/users/{user_id}")
+    async def user_detail(user_id: int, admin: dict = Depends(_require_permission('manage_users'))):
+        target = await database.get_user_by_id(user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Unknown user")
+        overrides = await database.list_user_guild_permissions(user_id)
+        return {
+            **dict(target),
+            "permissions": database.parse_permissions(target['permissions']),
+            "guild_overrides": [
+                {**_row_dict(r), "permissions": database.parse_permissions(r['permissions'])}
+                for r in overrides
+            ],
+        }
 
     @app.patch("/api/users/{user_id}")
-    async def set_role(user_id: int, body: UserRoleRequest, admin: dict = Depends(_require_admin)):
+    async def set_permissions(
+        user_id: int, body: PermissionsRequest, admin: dict = Depends(_require_permission('manage_users'))
+    ):
         target = await database.get_user_by_id(user_id)
         if target is None:
             raise HTTPException(status_code=404, detail="Unknown user")
@@ -345,10 +389,37 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
                 status_code=403,
                 detail="Seeded admin account managed by DISCORD_ADMIN_IDS only"
             )
-        updated = await database.set_user_role(user_id, body.role)
+        updated = await database.set_user_permissions(user_id, body.permissions)
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown user")
         return dict(updated)
+
+    @app.put("/api/users/{user_id}/guilds/{guild_id}")
+    async def set_guild_permissions(
+        user_id: int, guild_id: int, body: PermissionsRequest,
+        admin: dict = Depends(_require_permission('manage_users'))
+    ):
+        target = await database.get_user_by_id(user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Unknown user")
+        if target['seed']:
+            raise HTTPException(
+                status_code=403,
+                detail="Seeded admin account managed by DISCORD_ADMIN_IDS only"
+            )
+        get_guild(guild_id)  # 404 unless the bot is in that server
+        updated = await database.set_user_guild_permissions(user_id, guild_id, body.permissions)
+        return _row_dict(updated)
+
+    @app.delete("/api/users/{user_id}/guilds/{guild_id}")
+    async def clear_guild_permissions(
+        user_id: int, guild_id: int, admin: dict = Depends(_require_permission('manage_users'))
+    ):
+        target = await database.get_user_by_id(user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Unknown user")
+        await database.delete_user_guild_permissions(user_id, guild_id)
+        return {"removed": True}
 
     # ------------------------------------------------------------------
     # Access requests (the webapp onboarding for 'nobody' accounts)
@@ -366,7 +437,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         ]
 
     @app.get("/api/access-requests")
-    async def access_requests(admin: dict = Depends(_require_admin)):
+    async def access_requests(admin: dict = Depends(_require_permission('manage_users'))):
         rows = await database.list_access_requests()
         return [_row_dict(r) for r in rows]
 
@@ -389,17 +460,17 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"created": True, "request_id": request_id}
 
     @app.patch("/api/access-requests/{request_id}")
-    async def resolve_access_request(request_id: int, body: AccessRequestUpdate, admin: dict = Depends(_require_admin)):
+    async def resolve_access_request(request_id: int, body: AccessRequestUpdate, admin: dict = Depends(_require_permission('manage_users'))):
         updated = await database.set_access_request_status(request_id, body.status)
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown request or invalid status")
         return dict(updated)
 
     # ------------------------------------------------------------------
-    # Playback controls (admin only: DISCORD_ADMIN_IDS owners)
+    # Playback controls (permission: playback; per-guild overrides apply)
     # ------------------------------------------------------------------
     @app.post("/api/guilds/{guild_id}/pause")
-    async def pause(guild_id: int, admin: dict = Depends(_require_admin)):
+    async def pause(guild_id: int, admin: dict = Depends(_require_permission('playback'))):
         vc = get_voice(get_guild(guild_id))
         if not (vc and vc.is_playing()):
             raise HTTPException(status_code=409, detail="No track playing")
@@ -407,7 +478,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"paused": True}
 
     @app.post("/api/guilds/{guild_id}/resume")
-    async def resume(guild_id: int, admin: dict = Depends(_require_admin)):
+    async def resume(guild_id: int, admin: dict = Depends(_require_permission('playback'))):
         vc = get_voice(get_guild(guild_id))
         if not (vc and vc.is_paused()):
             raise HTTPException(status_code=409, detail="No paused track")
@@ -415,7 +486,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"resumed": True}
 
     @app.post("/api/guilds/{guild_id}/skip")
-    async def skip(guild_id: int, body: SkipRequest, admin: dict = Depends(_require_admin)):
+    async def skip(guild_id: int, body: SkipRequest, admin: dict = Depends(_require_permission('playback'))):
         guild = get_guild(guild_id)
         vc = get_voice(guild)
         if not (vc and vc.is_playing()):
@@ -436,7 +507,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"skipped": True, "extra_tracks_removed": removed}
 
     @app.post("/api/guilds/{guild_id}/stop")
-    async def stop(guild_id: int, admin: dict = Depends(_require_admin)):
+    async def stop(guild_id: int, admin: dict = Depends(_require_permission('playback'))):
         guild = get_guild(guild_id)
         if not get_voice(guild):
             raise HTTPException(status_code=409, detail="Bot is not in a voice channel")
@@ -452,7 +523,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"stopped": True}
 
     @app.post("/api/guilds/{guild_id}/play")
-    async def play(guild_id: int, body: PlayRequest, admin: dict = Depends(_require_admin)):
+    async def play(guild_id: int, body: PlayRequest, admin: dict = Depends(_require_permission('queue'))):
         guild = get_guild(guild_id)
         vc = get_voice(guild)
         stream_url, title, video_url, headers = await resolve_audio_info_async(body.query)
@@ -477,7 +548,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"playing": True, "title": title}
 
     @app.post("/api/guilds/{guild_id}/queue")
-    async def enqueue_at(guild_id: int, body: QueueEnqueueRequest, admin: dict = Depends(_require_admin)):
+    async def enqueue_at(guild_id: int, body: QueueEnqueueRequest, admin: dict = Depends(_require_permission('queue'))):
         guild = get_guild(guild_id)
         get_voice(guild)  # 409 if the bot is not connected
         stream_url, title, video_url, headers = await resolve_audio_info_async(body.query)
@@ -499,7 +570,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"queued": True, "row_id": row_id, "title": title}
 
     @app.patch("/api/guilds/{guild_id}/queue/{item_id}")
-    async def move_queued(guild_id: int, item_id: int, body: QueueMoveRequest, admin: dict = Depends(_require_admin)):
+    async def move_queued(guild_id: int, item_id: int, body: QueueMoveRequest, admin: dict = Depends(_require_permission('queue_manage'))):
         get_guild(guild_id)
         moved = await database.move_queue_item(guild_id, item_id, body.position)
         if moved is None:
@@ -507,7 +578,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return dict(moved)
 
     @app.delete("/api/guilds/{guild_id}/queue/{item_id}")
-    async def remove_queued(guild_id: int, item_id: int, admin: dict = Depends(_require_admin)):
+    async def remove_queued(guild_id: int, item_id: int, admin: dict = Depends(_require_permission('queue_manage'))):
         get_guild(guild_id)
         removed = await database.delete_queue_item(guild_id, item_id)
         if removed is None:
@@ -515,15 +586,15 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"removed": True, "title": removed['title']}
 
     @app.delete("/api/guilds/{guild_id}/queue")
-    async def clear_pendings(guild_id: int, admin: dict = Depends(_require_admin)):
+    async def clear_pendings(guild_id: int, admin: dict = Depends(_require_permission('queue_manage'))):
         get_guild(guild_id)
         await database.clear_queue(guild_id)
         return {"cleared": True}
 
     @app.get("/api/search")
-    async def search(q: str, user: dict = Depends(_require_account)):
+    async def search(q: str, user: dict = Depends(_require_permission('search'))):
         """Thin proxy for the free Deezer public metadata API (docs/meta layer:
-        no playback role): title/artist/cover/preview to power the webapp list;
+        no playback permission): title/artist/cover/preview to power the webapp list;
         picking a result just becomes a normal play/queue request."""
         q = q.strip()[:200]
         if not q:

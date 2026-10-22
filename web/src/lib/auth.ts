@@ -2,13 +2,29 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch, ApiError, getToken, clearToken } from "@/lib/api";
 
-export type Account = { id: number; username: string; role: string };
+export type Account = {
+  id: number;
+  username: string;
+  permissions: string[];
+  avatar_url: string | null;
+};
+
+export const PERMISSIONS = [
+  "view",
+  "search",
+  "queue",
+  "queue_manage",
+  "playback",
+  "manage_users",
+] as const;
 
 // Loads the current account once. A 401 means "really not authenticated"
 // (expired/revoked session): clear token and go to /login. Any other error
 // (bot down, network, 5xx) must NOT bounce: the page shows an error instead,
 // otherwise login page and dashboard would ping-pong into a blank screen.
-export function useAccount(requireAdmin = false) {
+// When requirePermission is set, an account without that permission is sent
+// back to the dashboard (403) instead of the login page.
+export function useAccount(requirePermission?: string) {
   const navigate = useNavigate();
   const [account, setAccount] = useState<Account | null>(null);
   const [loading, setLoading] = useState(true);
@@ -23,8 +39,11 @@ export function useAccount(requireAdmin = false) {
     apiFetch<Account>("/api/auth/me")
       .then((me) => {
         if (!alive) return;
-        if (requireAdmin && me.role !== "admin") navigate("/", { replace: true });
-        else setAccount(me);
+        if (requirePermission && !me.permissions.includes(requirePermission)) {
+          navigate("/", { replace: true });
+        } else {
+          setAccount(me);
+        }
         setLoading(false);
       })
       .catch((err) => {
@@ -43,7 +62,7 @@ export function useAccount(requireAdmin = false) {
       alive = false;
       window.removeEventListener("pakodj:unauthorized", onUnauthorized);
     };
-  }, [navigate, requireAdmin]);
+  }, [navigate, requirePermission]);
 
   return { account, loading, error };
 }
