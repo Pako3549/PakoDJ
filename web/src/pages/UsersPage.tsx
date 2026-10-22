@@ -43,20 +43,23 @@ type RowStaged = { permissions: string[]; removed: boolean };
 
 const same = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
 
-// Toggling helper: add the permission when missing, remove when present.
-function withPermission(list: string[], perm: string, on: boolean): string[] {
-  return on ? [...new Set([...list, perm])] : list.filter((p) => p !== perm);
-}
-
 // Short human descriptions next to the toggles.
 const PERMISSION_DESC: Record<string, string> = {
   view: "See servers, queues and now playing",
-  search: "Search tracks and listen to previews",
-  queue: "Play and add tracks to the queue",
+  queue: "Search and add tracks, play them",
   queue_manage: "Remove, reorder and clear the queue",
   playback: "Pause, resume, skip and stop",
   manage_users: "Manage accounts, permissions and requests",
 };
+
+function stagePerm(list: string[], perm: string, on: boolean): string[] {
+  // 'view' is the entry permission: dropping it empties the whole set, and
+  // no other chip can ever live in a viewless set (the API rejects 422).
+  if (perm === "view" && !on) return [];
+  const next = [...new Set(on ? [...list, perm] : list.filter((p) => p !== perm))];
+  if (!next.includes("view") && next.length > 0) return list;
+  return next;
+}
 
 function Avatar({ src, name, size = "w-9 h-9" }: { src: string | null; name: string; size?: string }) {
   if (src) return <img src={src} alt="" className={`${size} rounded-full`} />;
@@ -88,17 +91,19 @@ function Chip({
   onClick,
   disabled,
   label,
+  hint,
 }: {
   active: boolean;
   onClick: () => void;
   disabled?: boolean;
   label: string;
+  hint?: string;
 }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      title={PERMISSION_DESC[label]}
+      title={hint ?? PERMISSION_DESC[label]}
       className={`px-2.5 py-1 text-xs rounded-full border transition ${
         active
           ? "bg-accent/20 border-accent/40 text-accent font-medium"
@@ -723,20 +728,24 @@ export default function UsersPage() {
                         Global permissions
                       </p>
                       <div className="flex flex-wrap gap-1.5 items-center mb-2">
-                        {PERMISSIONS.map((perm) => (
-                          <Chip
-                            key={perm}
-                            active={permsFor(u).includes(perm)}
-                            disabled={busy !== null}
-                            label={perm}
-                            onClick={() =>
-                              setStagedGlobal((s) => ({
-                                ...s,
-                                [u.id]: withPermission(permsFor(u), perm, !permsFor(u).includes(perm)),
-                              }))
-                            }
-                          />
-                        ))}
+                        {PERMISSIONS.map((perm) => {
+                          const needsView = perm !== "view" && !permsFor(u).includes("view");
+                          return (
+                            <Chip
+                              key={perm}
+                              active={permsFor(u).includes(perm)}
+                              disabled={busy !== null || needsView}
+                              label={perm}
+                              hint={needsView ? "Enable view first: nothing can exist without it" : undefined}
+                              onClick={() =>
+                                setStagedGlobal((s) => ({
+                                  ...s,
+                                  [u.id]: stagePerm(permsFor(u), perm, !permsFor(u).includes(perm)),
+                                }))
+                              }
+                            />
+                          );
+                        })}
                       </div>
 
                       <p className="text-[11px] uppercase tracking-wide text-muted mb-2 mt-4">
@@ -776,23 +785,27 @@ export default function UsersPage() {
                                   </span>
                                   {!row.removed && (
                                     <div className="flex flex-wrap gap-1.5 flex-1 min-w-40">
-                                      {GUILD_PERMISSIONS.map((perm) => (
-                                        <Chip
-                                          key={perm}
-                                          active={row.permissions.includes(perm)}
-                                          disabled={busy !== null}
-                                          label={perm}
-                                          onClick={() =>
-                                            setStagedGuild((s) => ({
-                                              ...s,
-                                              [`${u.id}:${o.guild_id}`]: {
-                                                permissions: withPermission(row.permissions, perm, !row.permissions.includes(perm)),
-                                                removed: false,
-                                              },
-                                            }))
-                                          }
-                                        />
-                                      ))}
+                                      {GUILD_PERMISSIONS.map((perm) => {
+                                        const needsView = perm !== "view" && !row.permissions.includes("view");
+                                        return (
+                                          <Chip
+                                            key={perm}
+                                            active={row.permissions.includes(perm)}
+                                            disabled={busy !== null || needsView}
+                                            label={perm}
+                                            hint={needsView ? "Enable view first: nothing can exist without it" : undefined}
+                                            onClick={() =>
+                                              setStagedGuild((s) => ({
+                                                ...s,
+                                                [`${u.id}:${o.guild_id}`]: {
+                                                  permissions: stagePerm(row.permissions, perm, !row.permissions.includes(perm)),
+                                                  removed: false,
+                                                },
+                                              }))
+                                            }
+                                          />
+                                        );
+                                      })}
                                     </div>
                                   )}
                                   <span className="ml-auto">
@@ -830,23 +843,27 @@ export default function UsersPage() {
                                       {guilds.find((g) => g.id === gid)?.name ?? gid}
                                     </span>
                                     <div className="flex flex-wrap gap-1.5 flex-1 min-w-40">
-                                      {GUILD_PERMISSIONS.map((perm) => (
-                                        <Chip
-                                          key={perm}
-                                          active={prow.permissions.includes(perm)}
-                                          disabled={busy !== null}
-                                          label={perm}
-                                          onClick={() =>
-                                            setStagedGuild((s) => ({
-                                              ...s,
-                                              [`${u.id}:${gid}`]: {
-                                                permissions: withPermission(prow.permissions, perm, !prow.permissions.includes(perm)),
-                                                removed: false,
-                                              },
-                                            }))
-                                          }
-                                        />
-                                      ))}
+                                      {GUILD_PERMISSIONS.map((perm) => {
+                                        const needsView = perm !== "view" && !prow.permissions.includes("view");
+                                        return (
+                                          <Chip
+                                            key={perm}
+                                            active={prow.permissions.includes(perm)}
+                                            disabled={busy !== null || needsView}
+                                            label={perm}
+                                            hint={needsView ? "Enable view first: nothing can exist without it" : undefined}
+                                            onClick={() =>
+                                              setStagedGuild((s) => ({
+                                                ...s,
+                                                [`${u.id}:${gid}`]: {
+                                                  permissions: stagePerm(prow.permissions, perm, !prow.permissions.includes(perm)),
+                                                  removed: false,
+                                                },
+                                              }))
+                                            }
+                                          />
+                                        );
+                                      })}
                                     </div>
                                     <span className="ml-auto">
                                       <button

@@ -132,7 +132,7 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 
 **Setup requirements:** set `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` and `API_PUBLIC_ORIGIN` (e.g. `https://api.yourdomain.com`) in `bot/.env`, and register the redirect URI `${API_PUBLIC_ORIGIN}/api/auth/discord/callback` in your Discord application (discord.com/developers → OAuth2). Any Discord account can log in: the API stays closed until an admin grants permissions, and a stray account can at most hold one pending generic request (see below). Discord IDs in `DISCORD_ADMIN_IDS=<id>,...` are always admin — put your own ID there and your account is the owner-admin from the first login. Until those env vars are set, the Discord endpoints answer `503` and every other endpoint answers `401` (no anonymous surface).
 
-**Granular permissions:** every login auto-creates the account without API surface (empty permission set: only `/api/auth/me` and the access-request endpoints). Six permission keys, checked per endpoint: `view` (read endpoints), `search` (track metadata), `queue` (play/enqueue), `queue_manage` (remove/reorder/clear the queue), `playback` (pause/resume/skip/stop), `manage_users` (accounts + access requests). Users with `manage_users` manage the sets:
+**Granular permissions:** every login auto-creates the account without API surface (empty permission set: only `/api/auth/me` and the access-request endpoints). Five permission keys, checked per endpoint: `view` (read endpoints; the mandatory entry permission: every non-empty permission set must include it, at save time too - a set without `view` holding anything else is rejected with 422), `queue` (find tracks, play/enqueue, the search endpoint included), `queue_manage` (remove/reorder/clear the queue), `playback` (pause/resume/skip/stop), `manage_users` (accounts + access requests). Users with `manage_users` manage the sets:
 - `GET /api/users` — list accounts (id, username, permissions, seed flag, created_at, discord_id)
 - `PATCH /api/users/{id}` `{"permissions": [...]}` — replace the global set
 - `GET /api/users/{id}` — one account with its per-guild overrides
@@ -177,7 +177,7 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `GET` | `/api/guilds/{id}/status` | `view` | Now playing + queue count + voice state |
 | `GET` | `/api/now-playing` | `view` | What every connected server is playing |
 | `GET` | `/api/guilds/{id}/queue` | `view` | Queue of a server |
-| `GET` | `/api/search?q=` | `search` | Track metadata (free Deezer public API, server-cached) |
+| `GET` | `/api/search?q=` | `queue` (implies `view`) | Track metadata (free Deezer public API, server-cached) |
 | `POST` | `/api/guilds/{id}/queue` | `queue` | `{ "query": "...", "position": 0? }` — enqueue (append or at a position) |
 | `POST` | `/api/guilds/{id}/queue/reorder` | `queue_manage` | `{ "order": [item_id, ...] }` — batch rewrite of the queue order (drag & drop) |
 | `PATCH` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | `{ "position": n }` — move a single queued item |

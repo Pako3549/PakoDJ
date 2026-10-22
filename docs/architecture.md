@@ -50,7 +50,7 @@ Discord (gateway/voice) │  bot/main.py (discord.py)                    │
 | `queue_items` | Play queue rows per guild | canonical metadata only (title, webpage_url, search_query, collection_id, position) |
 | `history` | Playback history per guild | capped by query, replaces unbounded in-memory lists |
 | `now_playing` | DB mirror of what every guild is playing | written by `play_audio`, cleaned by after-playing/stop/guild-remove/voice-leave; powers `GET /api/now-playing` |
-| `users` | Discord-linked API accounts | `permissions` = JSON set (view/search/queue/queue_manage/playback/manage_users), `seed` = env-owned flag, `guild_ids` = JSON snapshot of shared guilds (refreshed at login), `avatar_hash`, `password_hash` kept empty for future needs |
+| `users` | Discord-linked API accounts | `permissions` = JSON set (view/queue/queue_manage/playback/manage_users), `seed` = env-owned flag, `guild_ids` = JSON snapshot of shared guilds (refreshed at login), `avatar_hash`, `password_hash` kept empty for future needs |
 | `api_sessions` | Server-side sessions | only the SHA-256 of the token is stored; TTL default 7 days (`API_SESSION_TTL_DAYS`) |
 | `access_requests` | Webapp onboarding: accounts without `view` ask for access | partial unique index ⇒ one pending request per (user, guild); guild_name snapshotted |
 | `user_guild_permissions` | Per-guild permission overrides | replaces the user's global set inside that guild only |
@@ -68,11 +68,17 @@ platform must serve a future web app with concurrent readers.
   Redirect URI is always `${API_PUBLIC_ORIGIN}/api/auth/discord/callback`
   (currently `https://dj.pako.uk`) — the domain lives in env, the path in code.
 - **Granular permissions:** accounts carry a JSON permission set — `view`
-  (read endpoints), `search` (metadata lookup), `queue` (play/enqueue),
+  (read endpoints), `queue` (find tracks, play/enqueue, search endpoint),
   `queue_manage` (remove/reorder/clear), `playback` (pause/resume/skip/stop),
   `manage_users` (accounts + access requests). Endpoints gate on exactly one
-  key: `_require_account` → `_require_permission(key)`. Legacy coarse roles
-  (`nobody`/`viewer`/`admin`) are migrated once at load into equivalent sets.
+  key: `_require_account` → `_require_permission(key)`. The functional keys
+  (queue, queue_manage, playback) implicitly require `view`: without it the
+  account has no access surface at all. `view` is also enforced at write time
+  (shared pydantic validator on both permission requests): a non-empty set
+  without `view` is rejected with 422, so an invalid set can never exist. Legacy coarse roles
+  (`nobody`/`viewer`/`admin`) are migrated once at load into equivalent sets,
+  and the retired `search` key is merged into `queue` by the same load-time
+  migration (both account sets and per-guild overrides).
 - **Per-guild overrides:** `user_guild_permissions` rows replace the global
   set inside that specific guild only (insert = override, delete = back to
   global). They never carry `manage_users`: account administration is a

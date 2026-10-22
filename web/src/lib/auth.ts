@@ -11,7 +11,6 @@ export type Account = {
 
 export const PERMISSIONS = [
   "view",
-  "search",
   "queue",
   "queue_manage",
   "playback",
@@ -68,3 +67,41 @@ export function useAccount(requirePermission?: string) {
 }
 
 export default useAccount;
+
+// Page-level live watcher (same no-polling SSE reader as the panels): when
+// an admin edits THIS account's permissions while the holder is browsing,
+// the page compares /me against the rendered set and reloads on any drift —
+// restrictions apply without the user having to refresh manually.
+export function usePermissionWatch(account: Account | null | undefined): void {
+  const baseline = JSON.stringify(account?.permissions ?? null);
+  useEffect(() => {
+    const token = getToken();
+    if (!account || !token) return;
+    const ctrl = new AbortController();
+    (async () => {
+      const res = await fetch("/api/stream/updates", {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: ctrl.signal,
+      });
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return; // drop: behaviour falls back to the next full load
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() ?? "";
+        if (parts.some((c) => c.startsWith("event: granted"))) {
+          const me = await apiFetch<Account>("/api/auth/me").catch(() => null);
+          if (me && JSON.stringify(me.permissions) !== baseline) {
+            window.location.reload();
+          }
+        }
+      }
+    })().catch(() => { /* replaced stream or aborted on unmount */ });
+    return () => ctrl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account?.id, baseline]);
+}

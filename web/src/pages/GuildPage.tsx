@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
-import { useAccount } from "@/lib/auth";
+import { useAccount, usePermissionWatch } from "@/lib/auth";
 import { useEscapeBack } from "@/lib/useEscapeBack";
 import ThemeToggle from "@/components/ThemeToggle";
 import ErrorBox from "@/components/ErrorBox";
@@ -38,12 +38,12 @@ export default function GuildPage() {
   const { guildId } = useParams<{ guildId: string }>();
   const location = useLocation();
   const { account, loading, error: authError } = useAccount();
+  usePermissionWatch(account);
   // Granular gating: each control group maps to its own permission key,
   // resolved against the global set (the API applies per-guild overrides).
   const canPlayback = account?.permissions.includes("playback") ?? false;
   const canQueue = account?.permissions.includes("queue") ?? false;
   const canQueueManage = account?.permissions.includes("queue_manage") ?? false;
-  const canSearch = account?.permissions.includes("search") ?? false;
   // The header has a back arrow: Escape goes back to the dashboard.
   useEscapeBack(Boolean(guildId));
 
@@ -190,7 +190,7 @@ export default function GuildPage() {
             <span className="hidden sm:inline">{account.username}</span>
           </div>
           <span className={`w-2.5 h-2.5 rounded-full ${status?.playing ? "bg-accent" : "bg-muted"}`} />
-          {(canPlayback || canSearch || canQueue) && (
+          {(canPlayback || canQueue) && (
             <div className="flex items-center gap-2">
               {canPlayback && (status?.paused ? (
                 <button onClick={() => admin(`/api/guilds/${guildId}/resume`, { method: "POST" })}
@@ -220,7 +220,7 @@ export default function GuildPage() {
 
       {error && <p className="text-xs text-red-400 mb-4">{error}</p>}
 
-      {(canQueue || canSearch) && (
+      {canQueue && (
         <section className="bg-card border border-border rounded-xl p-4 mb-6">
           <h2 className="text-sm font-medium mb-3">Add music</h2>
           <form onSubmit={runSearch} className="flex gap-2 mb-3">
@@ -228,12 +228,12 @@ export default function GuildPage() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              disabled={!canSearch && !canQueue}
-              placeholder={canSearch ? "Search a track or paste a YouTube / SoundCloud URL" : "Paste a URL to play or queue"}
+              disabled={!canQueue}
+              placeholder="Search a track or paste a YouTube / SoundCloud URL"
               className="flex-1 px-3 py-2 rounded-lg bg-surface border border-border text-sm text-primary placeholder:text-muted focus:outline-none focus:border-accent/60 disabled:opacity-50"
             />
-            <button type="submit" disabled={!canSearch && !canQueue} className="px-4 py-2 rounded-lg bg-accent text-inverse text-sm font-medium hover:bg-accent/90 transition disabled:opacity-50">
-              {canSearch ? "Search / Play" : "Play / Queue"}
+            <button type="submit" disabled={!canQueue} className="px-4 py-2 rounded-lg bg-accent text-inverse text-sm font-medium hover:bg-accent/90 transition disabled:opacity-50">
+              Search / Play
             </button>
           </form>
           {hits.length > 0 && (

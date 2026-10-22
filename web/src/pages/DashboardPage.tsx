@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, clearToken } from "@/lib/api";
-import { useAccount } from "@/lib/auth";
+import { useAccount, usePermissionWatch } from "@/lib/auth";
 import { readCache, writeCache } from "@/lib/cache";
 import ThemeToggle from "@/components/ThemeToggle";
 import ErrorBox from "@/components/ErrorBox";
@@ -15,6 +15,7 @@ type Statuses = Record<string, Status | null>;
 
 export default function DashboardPage() {
   const { account, loading, error } = useAccount();
+  usePermissionWatch(account);
   // Hydrate from the last fetched values so no fake default (0, "idle")
   // ever shows while the fresh data travels; "…" placeholders until then.
   const [guilds, setGuilds] = useState<Guild[] | null>(() => readCache<Guild[]>("pakodj:guilds", 10 * 60_000));

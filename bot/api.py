@@ -30,7 +30,7 @@ from urllib.parse import quote, urlencode
 from fastapi import Depends, FastAPI, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 import db as database
 
@@ -56,14 +56,27 @@ class SkipRequest(BaseModel):
     all: bool = False
 
 
-class GlobalPermissionsRequest(BaseModel):
-    permissions: list[Literal['view', 'search', 'queue', 'queue_manage', 'playback', 'manage_users']] = Field(max_length=6)
+class _ViewBaselineMixin(BaseModel):
+    # 'view' is the entry permission: a set without it cannot hold anything
+    # else. Invalid sets must never exist, not even transiently (the request
+    # is rejected at parse time with a 422).
+    permissions: list = Field(max_length=5)
+
+    @model_validator(mode="after")
+    def _view_is_baseline(self):
+        if self.permissions and 'view' not in self.permissions:
+            raise ValueError("'view' is mandatory: no other permission can exist without it")
+        return self
+
+
+class GlobalPermissionsRequest(_ViewBaselineMixin):
+    permissions: list[Literal['view', 'queue', 'queue_manage', 'playback', 'manage_users']] = Field(max_length=5)
 
 
 # Per-guild overrides never carry manage_users: account administration is a
 # global-only capability, so the narrower Literal rejects it at the API gate.
-class GuildPermissionsRequest(BaseModel):
-    permissions: list[Literal['view', 'search', 'queue', 'queue_manage', 'playback']] = Field(max_length=5)
+class GuildPermissionsRequest(_ViewBaselineMixin):
+    permissions: list[Literal['view', 'queue', 'queue_manage', 'playback']] = Field(max_length=4)
 
 
 class AccessRequestCreate(BaseModel):
@@ -247,11 +260,17 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
                 return database.parse_permissions(override['permissions'])
         return database.parse_permissions(user.get('permissions'))
 
+    # Without 'view' the account has no access surface at all: the
+    # functional gates (music control) implicitly require it on top.
+    _FUNCTIONAL_PERMISSIONS = ('queue', 'queue_manage', 'playback')
+
     def _require_permission(permission: str):
         async def dep(request: Request, user: dict = Depends(_require_account)) -> dict:
             perms = await _effective_permissions(user, request.path_params.get('guild_id'))
             if permission not in perms:
                 raise HTTPException(status_code=403, detail=f"Missing '{permission}' permission")
+            if permission in _FUNCTIONAL_PERMISSIONS and 'view' not in perms:
+                raise HTTPException(status_code=403, detail="Missing 'view' permission")
             return {**user, 'permissions': perms}
         return dep
 
@@ -874,7 +893,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return {"cleared": True}
 
     @app.get("/api/search")
-    async def search(q: str, user: dict = Depends(_require_permission('search'))):
+    async def search(q: str, user: dict = Depends(_require_permission('queue'))):
         """Thin proxy for the free Deezer public metadata API (docs/meta layer:
         no playback permission): title/artist/cover/preview to power the webapp list;
         picking a result just becomes a normal play/queue request."""

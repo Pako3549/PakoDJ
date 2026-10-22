@@ -97,7 +97,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS discord_token_expires TIMESTAMPTZ;
 -- Legacy coarse roles are migrated once on load (guard = untouched default).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions TEXT NOT NULL DEFAULT '["view"]';
 UPDATE users SET permissions =
-  '["view","search","queue","queue_manage","playback","manage_users"]'
+  '["view","queue","queue_manage","playback","manage_users"]'
   WHERE role = 'admin' AND permissions = '["view"]';
 UPDATE users SET permissions = '[]'
   WHERE role = 'nobody' AND permissions = '["view"]';
@@ -171,7 +171,42 @@ async def init_db():
     _pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=5, command_timeout=15)
     async with _pool.acquire() as conn:
         await conn.execute(SCHEMA)
+        await _merge_search_into_queue(conn)
     print(f"Database ready ({dsn.split('@')[-1]})")
+
+
+_CANONICAL_KEYS = ('view', 'queue', 'queue_manage', 'playback', 'manage_users')
+
+
+async def _merge_search_into_queue(conn):
+    """One-time data migration for the retired 'search' key: find+queue music
+    is a single permission now. Read-modify-write keeps the stored JSON a
+    clean canonical list; the UPDATE is a no-op once every row is migrated."""
+    canon_index = {k: i for i, k in enumerate(_CANONICAL_KEYS)}
+    for table, key_cols in (("users", "id"), ("user_guild_permissions", "user_id, guild_id")):
+        rows = await conn.fetch(
+            f"SELECT {key_cols}, permissions AS raw FROM {table} "
+            "WHERE permissions LIKE '%\"search\"%'"
+        )
+        for row in rows:
+            try:
+                keys = json.loads(row['raw'])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(keys, list):
+                continue
+            keys = sorted({_KEY_ALIASES.get(k, k) for k in keys}, key=lambda k: canon_index.get(k, 99))
+            merged = json.dumps(keys)
+            if table == "users":
+                await conn.execute("UPDATE users SET permissions = $2 WHERE id = $1", row['id'], merged)
+            else:
+                await conn.execute(
+                    "UPDATE user_guild_permissions SET permissions = $2 WHERE user_id = $1 AND guild_id = $3",
+                    row['user_id'], merged, row['guild_id']
+                )
+
+
+_KEY_ALIASES = {'search': 'queue'}
 
 
 def _pool_or_raise():
@@ -393,8 +428,8 @@ async def list_now_playing():
 ROLES = ('nobody', 'viewer', 'admin')  # legacy coarse roles, kept for the migration above
 
 # Granular permission keys (JSON arrays on users and user_guild_permissions).
-PERMISSIONS = ('view', 'search', 'queue', 'queue_manage', 'playback', 'manage_users')
-ALL_PERMISSIONS_JSON = '["view","search","queue","queue_manage","playback","manage_users"]'
+PERMISSIONS = ('view', 'queue', 'queue_manage', 'playback', 'manage_users')
+ALL_PERMISSIONS_JSON = '["view","queue","queue_manage","playback","manage_users"]'
 
 # Shared by upsert_discord_user (used twice: original + disambiguated username).
 _UPSERT_DISCORD_USER_SQL = (
@@ -418,9 +453,14 @@ def normalize_permissions(raw):
 
 
 def parse_permissions(raw):
-    """Decode the stored JSON permission array into a validated list."""
+    """Decode the stored JSON permission array into a validated list. The
+    retired 'search' key aliases to 'queue' so stale legacy rows degrade
+    gracefully instead of losing the merged permission."""
     try:
-        return normalize_permissions(json.loads(raw))
+        keys = json.loads(raw)
+        if isinstance(keys, list):
+            keys = ['queue' if k == 'search' else k for k in keys]
+        return normalize_permissions(keys)
     except (ValueError, TypeError):
         return []
 
