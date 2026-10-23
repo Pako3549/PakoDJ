@@ -183,7 +183,7 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `POST` | `/api/access-requests` | session | Submit an access request for a shared guild, or a generic one (`guild_id` omitted) |
 | `PATCH` | `/api/access-requests/{id}` | `manage_users` | Resolve a request (`granted`/`denied`) |
 | `GET` | `/api/guilds` | session | Servers the bot is in, filtered by what the account may see: global `view` = all, otherwise only the guilds carrying a per-guild `view` override |
-| `GET` | `/api/guilds/{id}/status` | `view` | Now playing + queue count + voice state |
+| `GET` | `/api/guilds/{id}/status` | `view` | Now playing (+ duration and elapsed position when known) + queue count + voice state |
 | `GET` | `/api/now-playing` | `view` | What every connected server is playing |
 | `GET` | `/api/guilds/{id}/queue` | `view` | Queue of a server |
 | `GET` | `/api/search?q=` | `queue` (implies `view`) | Track metadata (free Deezer public API, server-cached) |
@@ -192,8 +192,9 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `PATCH` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | `{ "position": n }` — move a single queued item |
 | `DELETE` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | Remove one queued item |
 | `DELETE` | `/api/guilds/{id}/queue` | `queue_manage` | Clear the queue |
-| `GET` | `/api/guilds/{id}/history` | `view` | History of a server |
-| `POST` | `/api/guilds/{id}/play` | `queue` | `{ "query": "..." }` — play or enqueue |
+| `GET` | `/api/guilds/{id}/history?offset=0` | `view` | History of a server, page of 20: `{ "items": [...], "total": n }` |
+| `DELETE` | `/api/guilds/{id}/history` | `queue_manage` | Clear the whole playback history of a server |
+| `POST` | `/api/guilds/{id}/play` | `queue` | `{ "query": "..." }` — play or enqueue; when idle the bot joins the voice channel where the requester's Discord account is (409 if it is not in voice: it never picks a channel by guess) |
 | `POST` | `/api/guilds/{id}/skip` | `playback` | `{ "all": false }` — skip / skip all |
 | `POST` | `/api/guilds/{id}/pause` · `/resume` · `/stop` | `playback` | Playback controls |
 

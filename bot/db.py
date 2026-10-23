@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS now_playing (
     requester_id BIGINT,
     started_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE now_playing ADD COLUMN IF NOT EXISTS duration DOUBLE PRECISION;
 
 -- Web API accounts: created exclusively via Discord OAuth login.
 -- password_hash is kept for future needs (e.g. service accounts); Discord
@@ -391,33 +392,55 @@ async def add_history(guild_id, title, webpage_url, requester_id=None):
         )
 
 
-async def list_history(guild_id, limit=50):
+async def list_history(guild_id, limit=50, offset=0):
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetch(
-            "SELECT * FROM history WHERE guild_id = $1 ORDER BY id DESC LIMIT $2",
-            guild_id, limit
+            "SELECT * FROM history WHERE guild_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3",
+            guild_id, limit, offset
         )
+
+
+async def count_history(guild_id):
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetchval(
+            "SELECT count(*) FROM history WHERE guild_id = $1", guild_id
+        )
+
+
+async def clear_history(guild_id):
+    """Wipe one guild's playback history; returns the removed row count."""
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.execute("DELETE FROM history WHERE guild_id = $1", guild_id)
 
 
 # ---------------------------------------------------------------------------
 # Now playing (real-time mirror for the web API)
 # ---------------------------------------------------------------------------
 
-async def set_now_playing(guild_id, title, webpage_url, requester_id=None):
+async def set_now_playing(guild_id, title, webpage_url, requester_id=None, duration=None):
     async with _pool_or_raise().acquire() as conn:
         await conn.execute(
-            "INSERT INTO now_playing (guild_id, title, webpage_url, requester_id) "
-            "VALUES ($1, $2, $3, $4) "
+            "INSERT INTO now_playing (guild_id, title, webpage_url, requester_id, duration) "
+            "VALUES ($1, $2, $3, $4, $5) "
             "ON CONFLICT (guild_id) DO UPDATE SET "
             "title = EXCLUDED.title, webpage_url = EXCLUDED.webpage_url, "
-            "requester_id = EXCLUDED.requester_id, started_at = now()",
-            guild_id, title, webpage_url, requester_id
+            "requester_id = EXCLUDED.requester_id, started_at = now(), "
+            "duration = EXCLUDED.duration",
+            guild_id, title, webpage_url, requester_id, duration
         )
 
 
 async def clear_now_playing(guild_id):
     async with _pool_or_raise().acquire() as conn:
         await conn.execute("DELETE FROM now_playing WHERE guild_id = $1", guild_id)
+
+
+async def clear_now_playing_all():
+    """Wipe the whole playback mirror. Bot startup only: right after a boot
+    the bot is in no voice channel, so any surviving row is a dangling
+    artifact of a previous run that died mid-playback."""
+    async with _pool_or_raise().acquire() as conn:
+        await conn.execute("DELETE FROM now_playing")
 
 
 async def list_now_playing():

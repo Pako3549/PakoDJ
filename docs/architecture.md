@@ -49,7 +49,7 @@ Discord (gateway/voice) │  bot/main.py (discord.py)                    │
 | `collections` | Playlist / album / loop groups being loaded in background | lets `!skip all` delete a whole group with one SQL statement |
 | `queue_items` | Play queue rows per guild | canonical metadata only (title, webpage_url, search_query, collection_id, position) |
 | `history` | Playback history per guild | capped by query, replaces unbounded in-memory lists |
-| `now_playing` | DB mirror of what every guild is playing | written by `play_audio`, cleaned by after-playing/stop/guild-remove/voice-leave; powers `GET /api/now-playing` |
+| `now_playing` | DB mirror of what every guild is playing | written by `play_audio`, cleaned by after-playing/stop/guild-remove/voice-leave AND wiped once at bot boot (a run that died mid-playback must not leave a dangling "playing" row); powers `GET /api/now-playing` |
 | `users` | Discord-linked API accounts | `permissions` = JSON set (view/queue/queue_manage/playback/manage_users), `seed` = env-owned flag, `guild_ids` = JSON snapshot of shared guilds (refreshed at login), `avatar_hash`, `password_hash` kept empty for future needs |
 | `api_sessions` | Server-side sessions | only the SHA-256 of the token is stored; TTL default 7 days (`API_SESSION_TTL_DAYS`) |
 | `access_requests` | Webapp onboarding: accounts without `view` ask for access | partial unique index ⇒ one pending request per (user, guild); guild_name snapshotted |
@@ -118,8 +118,12 @@ platform must serve a future web app with concurrent readers.
   the dashboard. The admin Users page holds the same stream and receives
   `event: requests` for every newly created access request (broadcast to
   manage_users streams only, flagged at connect), refreshing the queue in
-  place. `X-Accel-Buffering: no` keeps nginx from buffering the stream; no
-  extra nginx configuration exists for it.
+  place. The music page listens for `event: playback` (guild id payload,
+  broadcast to every open stream by the pipeline via `notify_playback`:
+  track start, pause, resume, skip, stop, queue drain) and refetches status,
+  queue and history on it — progress interpolates locally second by second
+  between pushes. `X-Accel-Buffering: no` keeps nginx from buffering the
+  stream; no extra nginx configuration exists for it.
   Each created request DMs every env admin (best effort, 10 s timeout,
   silent failure) so the panel does not need watching; resolving a request
   clears the row immediately via the follow-up reload in the web UI.

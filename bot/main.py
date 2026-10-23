@@ -173,6 +173,7 @@ def get_audio_stream_url(url):
                 info = ydl.extract_info(url, download=True)
                 if info is None:
                     raise ValueError("No information retrieved from URL")
+                _remember_duration(info)
                 # Return the downloaded file path instead of stream URL
                 import glob
                 downloaded_file = glob.glob(f"{ram_dir}/{info['title']}.*")
@@ -186,12 +187,31 @@ def get_audio_stream_url(url):
                 info = ydl.extract_info(url, download=False)
                 if info is None:
                     raise ValueError("No information retrieved from URL")
+                _remember_duration(info)
                 headers = _extract_http_headers(info)
                 return info['url'], info['title'], info['webpage_url'], headers
                 
     except Exception as e:
         print(f"Error retrieving audio stream for '{url}': {e}")
         return None, None, None, None
+
+# Duration (seconds) per resolved webpage URL, stashed by the resolvers from
+# the same yt-dlp info dict used for the stream; the now-playing mirror reads
+# it for the web progress line. Capped: oldest entries drop at 512 keys.
+_track_durations: dict[str, float] = {}
+
+
+def _remember_duration(info):
+    try:
+        duration = info.get('duration')
+        url = info.get('webpage_url')
+        if duration and url:
+            if len(_track_durations) >= 512:
+                _track_durations.pop(next(iter(_track_durations)))
+            _track_durations[url] = float(duration)
+    except (ValueError, TypeError, AttributeError):
+        pass
+
 
 # Search on youtube using a query written by the user
 def search_youtube(query):
@@ -211,6 +231,7 @@ def search_youtube(query):
             if info and 'entries' in info and info['entries']:
                 entry = info['entries'][0]
                 print(f"Found YouTube video: {entry['title']}")
+                _remember_duration(entry)
                 headers = _extract_http_headers(entry)
                 return entry['url'], entry['title'], entry['webpage_url'], headers
             else:
@@ -578,6 +599,12 @@ def after_playing(error, guild_id):
                 row = await database.claim_next_track(guild_id)
                 if row is None:
                     server_info['current_track'] = None
+                    server_info.pop('paused_at', None)
+                    try:
+                        from api import notify_playback
+                        notify_playback(guild_id)
+                    except ImportError:
+                        pass
                     break
                 played = await play_queued_row(guild_id, row)
                 if played:
@@ -587,10 +614,13 @@ def after_playing(error, guild_id):
 
 # Pick a text channel to announce playback (falls back to the first available)
 def get_notify_channel(guild, channel_id):
-    if channel_id:
-        channel = bot.get_channel(channel_id)
-        if channel is not None and hasattr(channel, 'send'):
-            return channel
+    # Tracks queued from the web panel carry no text channel: they stay
+    # silent in Discord on purpose (no announcement, no error text there).
+    if not channel_id:
+        return None
+    channel = bot.get_channel(channel_id)
+    if channel is not None and hasattr(channel, 'send'):
+        return channel
     for text_channel in guild.text_channels:
         return text_channel
     return None
@@ -608,6 +638,11 @@ async def play_queued_row(guild_id, row, autopilot=True, voice_channel=None):
         await database.clear_queue(guild_id)
         await database.clear_now_playing(guild_id)
         get_server_info(guild_id)['current_track'] = None
+        try:
+            from api import notify_playback
+            notify_playback(guild_id)
+        except ImportError:
+            pass
         return True
     
     try:
@@ -685,6 +720,8 @@ async def play_audio(guild, notify_channel, stream_url, title, video_url, header
         await database.add_history(guild.id, title, video_url)
 
         # Set current track with temp file info for cleanup
+        server_info = get_server_info(guild.id)
+        server_info.pop('paused_at', None)  # fresh track: progress restarts
         track_info = {'title': title, 'video_url': video_url}
         if is_temp_file:
             track_info['temp_file'] = stream_url
@@ -692,9 +729,17 @@ async def play_audio(guild, notify_channel, stream_url, title, video_url, header
             track_info['headers'] = headers
         if collection_id:
             track_info['collection_id'] = collection_id
-        get_server_info(guild.id)['current_track'] = track_info
-        # Real-time mirror for the web API (see api.py)
-        await database.set_now_playing(guild.id, title, video_url)
+        server_info['current_track'] = track_info
+        # Real-time mirror for the web API (see api.py); duration feeds the
+        # web progress line when the resolver managed to capture it.
+        await database.set_now_playing(
+            guild.id, title, video_url, duration=_track_durations.get(video_url)
+        )
+        try:
+            from api import notify_playback
+            notify_playback(guild.id)
+        except ImportError:
+            pass
         return True
     except Exception as e:
         if notify_channel:
@@ -951,6 +996,8 @@ async def skip(ctx, arg: str = None):
 async def pause(ctx):
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.pause()
+        # Freeze the progress marker at the pause instant (runtime only).
+        get_server_info(ctx.guild.id)['paused_at'] = time.time()
         await ctx.send("Track paused.")
     else:
         await ctx.send("No track playing.")
@@ -960,6 +1007,7 @@ async def pause(ctx):
 async def resume(ctx):
     if ctx.voice_client and ctx.voice_client.is_paused():
         ctx.voice_client.resume()
+        get_server_info(ctx.guild.id).pop('paused_at', None)
         await ctx.send("Track resumed.")
     else:
         await ctx.send("No paused track.")
@@ -1008,6 +1056,7 @@ async def stop(ctx):
             task.cancel()
         server_info['loading_task'] = None
         server_info['current_track'] = None
+        server_info.pop('paused_at', None)
         await database.clear_queue(ctx.guild.id)
         await database.clear_now_playing(ctx.guild.id)
         if ctx.voice_client and ctx.voice_client.is_connected():
@@ -1036,7 +1085,7 @@ def _start_api_server():
     class APIServer(uvicorn.Server):
         def install_signal_handlers(self):
             pass  # the bot process owns the signal handlers
-    app = create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, get_server_lock)
+    app = create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, get_server_info, get_server_lock)
     config = uvicorn.Config(
         app,
         host=os.getenv('API_HOST', '0.0.0.0'),      # reachability is decided by published ports (none!)
@@ -1046,13 +1095,27 @@ def _start_api_server():
     return APIServer(config)
 
 # Event to log bot's successful connection on console (and init the DB)
+_boot_mirror_cleaned = False
+
+
 @bot.event
 async def on_ready():
-    global _api_task
+    global _api_task, _boot_mirror_cleaned
     try:
         await database.init_db()
     except Exception as e:
         print(f"WARNING: database initialisation failed ({e}); queue features unavailable")
+    if not _boot_mirror_cleaned:
+        _boot_mirror_cleaned = True
+        # A previous run may have died mid-playback: the surviving mirror row
+        # would show a stale "playing" state with an absurd elapsed time. The
+        # bot is in no voice channel at boot, so the honest state is "nothing
+        # playing" everywhere. Once per process: on_ready can fire again on
+        # gateway reconnects and must not wipe a LIVE mirror then.
+        try:
+            await database.clear_now_playing_all()
+        except Exception as e:
+            print(f"WARNING: could not clear the playback mirror at boot ({e})")
     if _api_task is None:
         server = _start_api_server()
         if server is not None:
@@ -1127,7 +1190,13 @@ async def on_voice_state_update(member, before, after):
             task.cancel()
         server_info['loading_task'] = None
         server_info['current_track'] = None
+        server_info.pop('paused_at', None)
         await database.clear_now_playing(member.guild.id)
+        try:
+            from api import notify_playback
+            notify_playback(member.guild.id)
+        except ImportError:
+            pass
         # The queue stays in the DB: '!skip' can resume it once back in voice
 
 bot.run(os.getenv('token'))

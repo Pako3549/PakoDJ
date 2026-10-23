@@ -228,6 +228,21 @@ def _notify_admins(event: str, data: str) -> None:
                 q.put_nowait((event, data))
 
 
+def _notify_all(event: str, data: str) -> None:
+    """Fan-out to every open stream regardless of the admin flag (playback
+    state changes concern the whole music page)."""
+    for entries in _stream_queues.values():
+        for q, _is_admin in entries:
+            if q.qsize() < q.maxsize:
+                q.put_nowait((event, data))
+
+
+def notify_playback(guild_id: int) -> None:
+    """Called by the playback pipeline: the music page refetches status and
+    queue on this event instead of polling."""
+    _notify_all("playback", str(guild_id))
+
+
 async def resolve_access_request_from_dm(request_id: int, grant: bool, actor: str) -> str:
     """Shared resolver behind the Accept/Deny buttons on the admin DM: the
     same permission flow as the web panel (guild request -> `view` merged
@@ -286,7 +301,7 @@ class AccessRequestDMView(discord.ui.View):
 # Application factory (no circular imports: main.py injects its live pieces)
 # ---------------------------------------------------------------------------
 
-def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, get_server_lock):
+def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, get_server_info, get_server_lock):
     # App-level dependency: everything requires a valid session, except the
     # Discord OAuth flow itself (trailing slashes normalized).
     async def _require_account(request: Request, authorization: Optional[str] = Header(None)) -> dict:
@@ -533,6 +548,37 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
     def get_voice(guild):
         return guild.voice_client
 
+    def really_in_voice(guild):
+        """Strict voice check: the voice client must report connected AND the
+        gateway voice state of the bot must still point at a channel. A dead
+        handshake or a UI disconnect leaves a stale VoiceClient behind that
+        still claims to be connected — this catches both."""
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected():
+            return False
+        member = guild.get_member(bot.user.id)
+        return bool(member and member.voice and member.voice.channel)
+
+    async def drop_stale_voice(guild):
+        """Force-disconnect a voice client that claims to be connected while
+        the gateway disagrees; the next play/start joins fresh."""
+        vc = guild.voice_client
+        if vc is not None and vc.is_connected() and not really_in_voice(guild):
+            await vc.disconnect(force=True)
+            return True
+        return False
+
+    def pick_voice_channel(guild, user):
+        """Voice channel to auto-join when the panel starts playback: only the
+        one where the requesting account's Discord user is sitting. None when
+        the account is not in voice — the bot never picks a channel by guess."""
+        discord_id = str(user.get('discord_id') or '')
+        for channel in guild.voice_channels:
+            for member in channel.members:
+                if str(member.id) == discord_id:
+                    return channel
+        return None
+
     # ------------------------------------------------------------------
     # Basic info
     # ------------------------------------------------------------------
@@ -560,15 +606,27 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
     async def status(guild_id: int, user: dict = Depends(_require_permission('view'))):
         guild = get_guild(guild_id)
         vc = get_voice(guild)
+        in_voice = really_in_voice(guild)
         now = await database.list_now_playing()
         row = next((r for r in now if r['guild_id'] == guild_id), None)
+        # Playback position: elapsed since the mirror's started_at, frozen at
+        # the pause instant via the runtime paused_at marker (None when idle
+        # or when the row predates the duration tracking).
+        position = None
+        if row is not None and in_voice:
+            started = row['started_at'].timestamp()
+            if vc.is_playing():
+                position = max(0, int(time.time() - started))
+            elif vc.is_paused() and get_server_info(guild_id).get('paused_at'):
+                position = max(0, int(get_server_info(guild_id)['paused_at'] - started))
         return {
             "guild_id": str(guild_id),
             "guild_name": guild.name,
-            "voice_connected": bool(vc and vc.is_connected()),
-            "playing": bool(vc and vc.is_playing()),
-            "paused": bool(vc and vc.is_paused()),
+            "voice_connected": in_voice,
+            "playing": bool(in_voice and vc.is_playing()),
+            "paused": bool(in_voice and vc.is_paused()),
             "now_playing": _row_dict(row) if row else None,
+            "position": position,
             "queue_count": await database.count_queue(guild_id),
             "loading_in_background": bool(get_server_info(guild_id).get('loading_task')),
         }
@@ -583,10 +641,17 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         return [_row_dict(r) for r in rows]
 
     @app.get("/api/guilds/{guild_id}/history")
-    async def history(guild_id: int, user: dict = Depends(_require_permission('view'))):
+    async def history(guild_id: int, offset: int = 0, user: dict = Depends(_require_permission('view'))):
         get_guild(guild_id)
-        rows = await database.list_history(guild_id, limit=100)
-        return [_row_dict(r) for r in rows]
+        offset = max(0, min(offset, 1000000))
+        rows = await database.list_history(guild_id, limit=20, offset=offset)
+        return {"items": [_row_dict(r) for r in rows], "total": await database.count_history(guild_id)}
+
+    @app.delete("/api/guilds/{guild_id}/history")
+    async def clear_guild_history(guild_id: int, admin: dict = Depends(_require_permission('queue_manage'))):
+        get_guild(guild_id)
+        removed = await database.clear_history(guild_id)
+        return {"cleared": True, "removed": int(removed.split()[-1])}
 
     @app.get("/api/now-playing")
     async def now_playing(user: dict = Depends(_require_permission('view'))):
@@ -819,25 +884,59 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
     # ------------------------------------------------------------------
     @app.post("/api/guilds/{guild_id}/pause")
     async def pause(guild_id: int, admin: dict = Depends(_require_permission('playback'))):
-        vc = get_voice(get_guild(guild_id))
-        if not (vc and vc.is_playing()):
+        guild = get_guild(guild_id)
+        vc = get_voice(guild)
+        if not (really_in_voice(guild) and vc.is_playing()):
             raise HTTPException(status_code=409, detail="No track playing")
         vc.pause()
+        # Freeze the progress marker at the pause instant (runtime only).
+        get_server_info(guild_id)['paused_at'] = time.time()
+        notify_playback(guild_id)
         return {"paused": True}
 
     @app.post("/api/guilds/{guild_id}/resume")
     async def resume(guild_id: int, admin: dict = Depends(_require_permission('playback'))):
-        vc = get_voice(get_guild(guild_id))
-        if not (vc and vc.is_paused()):
+        guild = get_guild(guild_id)
+        vc = get_voice(guild)
+        if not (really_in_voice(guild) and vc.is_paused()):
             raise HTTPException(status_code=409, detail="No paused track")
         vc.resume()
+        get_server_info(guild_id).pop('paused_at', None)
+        notify_playback(guild_id)
         return {"resumed": True}
+
+    @app.post("/api/guilds/{guild_id}/queue/start")
+    async def start_queue(guild_id: int, admin: dict = Depends(_require_permission('playback'))):
+        """Restart the persisted queue from the panel when nothing is playing
+        (e.g. after a bot restart): auto-joins the requester's voice channel,
+        never a guessed one. The channel check happens BEFORE the claim so a
+        409 never swallows a queued row."""
+        guild = get_guild(guild_id)
+        vc = get_voice(guild)
+        if really_in_voice(guild) and (vc.is_playing() or vc.is_paused()):
+            raise HTTPException(status_code=409, detail="Already playing")
+        voice_channel = None
+        if not really_in_voice(guild):
+            await drop_stale_voice(guild)  # stale handshake cleanup
+            voice_channel = pick_voice_channel(guild, admin)
+            if voice_channel is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Join a voice channel first: the bot only follows your account, it never picks a channel by guess"
+                )
+        row = await database.claim_next_track(guild_id)
+        if row is None:
+            raise HTTPException(status_code=409, detail="Queue is empty")
+        played = await play_queued_row(guild_id, row, autopilot=False, voice_channel=voice_channel)
+        if not played:
+            raise HTTPException(status_code=500, detail="Playback failed")
+        return {"started": True, "title": row['title']}
 
     @app.post("/api/guilds/{guild_id}/skip")
     async def skip(guild_id: int, body: SkipRequest, admin: dict = Depends(_require_permission('playback'))):
         guild = get_guild(guild_id)
         vc = get_voice(guild)
-        if not (vc and vc.is_playing()):
+        if not (really_in_voice(guild) and vc.is_playing()):
             raise HTTPException(status_code=409, detail="No track playing")
 
         server_info = get_server_info(guild_id)
@@ -852,6 +951,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
             if collection_id:
                 removed = await database.clear_collection(guild_id, collection_id)
         vc.stop()
+        notify_playback(guild_id)
         return {"skipped": True, "extra_tracks_removed": removed}
 
     @app.post("/api/guilds/{guild_id}/stop")
@@ -867,7 +967,9 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         server_info['current_track'] = None
         await database.clear_queue(guild_id)
         await database.clear_now_playing(guild_id)
+        get_server_info(guild_id).pop('paused_at', None)
         await guild.voice_client.disconnect()
+        notify_playback(guild_id)
         return {"stopped": True}
 
     @app.post("/api/guilds/{guild_id}/play")
@@ -878,19 +980,28 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, get_server_info, g
         if stream_url is None:
             raise HTTPException(status_code=400, detail="Unable to retrieve audio stream")
 
-        occupied = vc and (vc.is_playing() or vc.is_paused())
+        in_voice = really_in_voice(guild)
+        occupied = in_voice and (vc.is_playing() or vc.is_paused())
         if occupied:
             row_id = await database.enqueue_track(
                 guild_id=guild_id, title=title, webpage_url=video_url,
                 search_query=body.query
             )
             return {"queued": True, "row_id": row_id, "title": title}
-        if vc is None:
-            raise HTTPException(
-                status_code=409,
-                detail="Bot is not in a voice channel in this server; use !play in Discord first"
-            )
-        played = await play_audio(guild, None, stream_url, title, video_url, headers=headers)
+        # Not in voice (or a stale/lost handshake): the panel makes the bot
+        # join by itself — the requester's voice channel if visible, else it
+        # refuses. No more "use !play in Discord first".
+        if not in_voice:
+            await drop_stale_voice(guild)
+            voice_channel = pick_voice_channel(guild, admin)
+            if voice_channel is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Join a voice channel first: the bot only follows your account, it never picks a channel by guess"
+                )
+        else:
+            voice_channel = None
+        played = await play_audio(guild, None, stream_url, title, video_url, headers=headers, voice_channel=voice_channel)
         if not played:
             raise HTTPException(status_code=500, detail="Playback failed")
         return {"playing": True, "title": title}
