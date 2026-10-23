@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch, clearToken, getToken } from "@/lib/api";
+import { openStream } from "@/lib/live";
 import type { Account } from "@/lib/auth";
 import ErrorBox from "@/components/ErrorBox";
 
@@ -158,41 +159,23 @@ export default function RequestAccessPanel({ account }: { account: Account }) {
   // directly edits the account; the page reloads into the dashboard. A
   // scoped-override grant leaves /me untouched, hence a single fallback
   // check on the visibility-filtered guild list right before reloading.
-  useEffect(() => {
-    const token = getToken();
-    if (!token) return;
-    const ctrl = new AbortController();
-    (async () => {
-      const res = await fetch("/api/stream/updates", {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: ctrl.signal,
-      });
-      if (!res.ok || !res.body) return;
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) return; // transient drop: reload restores the stream
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-        if (parts.some((c) => c.startsWith("event: granted"))) {
-          // A grant may be global (permissions non-empty) or scoped-only
-          // (override on one guild, /me stays empty but the guild becomes
-          // visible); either detail forces the dashboard reload.
-          const me = await apiFetch<Account>("/api/auth/me").catch(() => null);
-          const visibles = me && me.permissions.length === 0
-            ? await apiFetch<{ id: string }[]>("/api/guilds").catch(() => [])
-            : [];
-          if (!me || me.permissions.length > 0 || visibles.length > 0) {
-            window.location.reload();
-          }
+  // The shared reader reconnects on its own after any drop.
+  useEffect(() => openStream((name) => {
+    if (name !== "granted") return;
+    // A grant may be global (permissions non-empty) or scoped-only
+    // (override on one guild, /me stays empty but the guild becomes
+    // visible); either detail forces the dashboard reload.
+    apiFetch<Account>("/api/auth/me")
+      .then(async (me) => {
+        const visibles = me && me.permissions.length === 0
+          ? await apiFetch<{ id: string }[]>("/api/guilds").catch(() => [])
+          : [];
+        if (!me || me.permissions.length > 0 || visibles.length > 0) {
+          window.location.reload();
         }
-      }
-    })().catch(() => { /* connection replaced or aborted on unmount */ });
-    return () => ctrl.abort();
-  }, []);
+      })
+      .catch(() => {});
+  }), []);
 
   return (
     <main className="min-h-svh flex items-center justify-center px-4">

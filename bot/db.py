@@ -224,6 +224,18 @@ def _pool_or_raise():
 # Queue
 # ---------------------------------------------------------------------------
 
+def _notify_playback(guild_id):
+    """Queue mutations push the same SSE event the playback pipeline uses,
+    so the music page refetches its lists no matter which surface mutated
+    them (Discord commands, panel actions). Lazy import: db must not depend
+    on the api module at load time."""
+    try:
+        from api import notify_playback
+        notify_playback(guild_id)
+    except ImportError:
+        pass
+
+
 async def enqueue_track(guild_id, title, webpage_url, search_query=None,
                         collection_id=None, collection_type=None,
                         requester_id=None, channel_id=None):
@@ -234,10 +246,12 @@ async def enqueue_track(guild_id, title, webpage_url, search_query=None,
     expire after a few hours.
     """
     async with _pool_or_raise().acquire() as conn:
-        return await conn.fetchval(
+        row_id = await conn.fetchval(
             INSERT_TRACK, guild_id, title, webpage_url, search_query,
             collection_id, collection_type, requester_id, channel_id
         )
+    _notify_playback(guild_id)
+    return row_id
 
 
 async def claim_next_track(guild_id):
@@ -268,11 +282,13 @@ async def insert_track_at_position(guild_id, position, title, webpage_url,
                 "WHERE guild_id = $1 AND position >= $2",
                 guild_id, position
             )
-            return await conn.fetchval(
+            row_id = await conn.fetchval(
                 INSERT_TRACK_AT_POSITION, guild_id, title, webpage_url,
                 search_query, collection_id, collection_type,
                 requester_id, channel_id, position
             )
+    _notify_playback(guild_id)
+    return row_id
 
 
 async def move_queue_item(guild_id, item_id, position):
@@ -301,12 +317,14 @@ async def move_queue_item(guild_id, item_id, position):
                     "WHERE guild_id = $1 AND position > $2 AND position <= $3",
                     guild_id, old, position
                 )
-            return await conn.fetchrow(
+            moved = await conn.fetchrow(
                 "UPDATE queue_items SET position = $3 "
                 "WHERE guild_id = $1 AND id = $2 "
                 "RETURNING id, title, position",
                 guild_id, item_id, position
             )
+            _notify_playback(guild_id)
+            return moved
 
 
 async def delete_queue_item(guild_id, item_id):
@@ -323,7 +341,9 @@ async def delete_queue_item(guild_id, item_id):
                     "WHERE guild_id = $1 AND position > $2",
                     guild_id, item['position']
                 )
-            return item
+        if item is not None:
+            _notify_playback(guild_id)
+        return item
 
 
 async def clear_collection(guild_id, collection_id):
@@ -341,6 +361,7 @@ async def clear_collection(guild_id, collection_id):
 async def clear_queue(guild_id):
     async with _pool_or_raise().acquire() as conn:
         await conn.execute("DELETE FROM queue_items WHERE guild_id = $1", guild_id)
+    _notify_playback(guild_id)
 
 
 async def count_queue(guild_id):
@@ -376,6 +397,7 @@ async def set_queue_order(guild_id, order):
                 "UPDATE queue_items SET position = $2 WHERE guild_id = $1 AND id = $3",
                 [(guild_id, idx, item_id) for idx, item_id in enumerate(final)]
             )
+        _notify_playback(guild_id)
         return len(final)
 
 
