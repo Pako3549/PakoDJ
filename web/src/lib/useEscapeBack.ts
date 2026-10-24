@@ -75,6 +75,10 @@ export function useEscapeBack(enabled = true) {
   useEffect(() => {
     if (!enabled) return;
     const onKey = (e: KeyboardEvent) => {
+      // Plain Escape only: any other key (or Ctrl/Alt/Meta combo) must
+      // never trigger the in-app back navigation.
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      if (e.key !== "Escape") return;
       navigate(goBack(location.pathname + location.search));
     };
     window.addEventListener("keydown", onKey);

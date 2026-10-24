@@ -154,6 +154,8 @@ export default function UsersPage() {
   useEffect(() => {
     if (confirmDelete !== null) {
       const onKey = (e: KeyboardEvent) => {
+        if (e.ctrlKey || e.altKey || e.metaKey) return; // plain Escape only: Ctrl combos must never navigate
+        if (e.ctrlKey || e.altKey || e.metaKey) return; // plain Escape only
         if (e.key === "Escape") setConfirmDelete(null);
       };
       window.addEventListener("keydown", onKey);
@@ -161,6 +163,7 @@ export default function UsersPage() {
     }
     if (openId === null) return;
     const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return; // plain Escape only
       if (e.key !== "Escape") return;
       closeEditor(openId);
     };
