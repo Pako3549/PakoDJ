@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { apiFetch, clearToken } from "@/lib/api";
 import { useAccount, usePermissionWatch } from "@/lib/auth";
@@ -13,6 +13,7 @@ type QueueItem = {
   webpage_url: string;
   position: number;
   search_query?: string | null;
+  pending?: boolean;
 };
 
 type GuildStatus = {
@@ -35,6 +36,7 @@ type SearchHit = {
   cover: string;
   preview: string;
   duration: number;
+  link?: string | null;
 };
 
 type HistoryItem = {
@@ -54,6 +56,7 @@ type Favorite = {
 
 const QUEUE_PAGE_SIZE = 15;
 const HISTORY_PAGE_SIZE = 20;
+const FAV_PAGE_SIZE = 10;
 
 // Seconds -> m:ss (or h:mm:ss past the hour), no fake zeros anywhere.
 function fmt(total: number | null | undefined): string {
@@ -95,6 +98,15 @@ function GripIcon() {
   );
 }
 
+function PlusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className={iconCls} aria-hidden="true">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
 function ArrowLeftIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={iconCls} aria-hidden="true">
@@ -124,8 +136,11 @@ export default function GuildPage() {
   const canPlayback = account?.permissions.includes("playback") ?? false;
   const canQueue = account?.permissions.includes("queue") ?? false;
   const canQueueManage = account?.permissions.includes("queue_manage") ?? false;
-  // The header has a back arrow: Escape goes back to the dashboard.
-  useEscapeBack(Boolean(guildId));
+  // The header has a back arrow: Escape goes back to the dashboard
+  // (suppressed while the add-music dialog owns the Escape key).
+  const [addOpen, setAddOpen] = useState(false);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  useEscapeBack(Boolean(guildId) && !addOpen);
 
   // The guild name renders from the very first frame: it comes from the
   // dashboard link state (same-session navigation) or, on direct loads,
@@ -146,6 +161,8 @@ export default function GuildPage() {
   const [historyPage, setHistoryPage] = useState(0);
   const [favorites, setFavorites] = useState<Favorite[] | null>(null);
   const [favQuery, setFavQuery] = useState("");
+  const [favPage, setFavPage] = useState(0);
+  const [searching, setSearching] = useState(false);
   // Progress baseline: the position reported by the last status fetch plus
   // when it was fetched; the 1s ticker interpolates between fetches.
   const [posSync, setPosSync] = useState<{ position: number | null; at: number }>({ position: null, at: 0 });
@@ -243,6 +260,18 @@ export default function GuildPage() {
     }
   });
 
+  // Add-music modal: focus the search box on open, Escape closes the
+  // dialog itself (the page-level Escape-back is suppressed while open).
+  useEffect(() => {
+    if (!addOpen) return;
+    searchRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAddOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [addOpen]);
+
   // 1s interpolation tick for the progress line (local only, no network).
   useEffect(() => {
     const id = setInterval(() => setNowTs(Date.now()), 1000);
@@ -295,20 +324,43 @@ export default function GuildPage() {
   }
 
   // ---------- search + enqueue ----------
+  // Optimistic enqueue: the track shows up in the list right away with the
+  // raw query as placeholder; the server confirmation (which resolves the
+  // canonical data via yt-dlp) reconciles the truth through the SSE reload.
+  function optimisticEnqueue(label: string, fire: () => Promise<void>) {
+    setQuery("");
+    setHits([]);
+    setPreviewing(null);
+    setQueue((cur) => [
+      ...cur,
+      { id: -Date.now(), title: label, webpage_url: "", position: cur.length + 1, pending: true },
+    ]);
+    (async () => {
+      try {
+        await fire();
+      } finally {
+        setQueue((cur) => cur.filter((i) => !i.pending));
+        await reloadData();
+      }
+    })();
+  }
+
   async function runSearch(e: React.FormEvent) {
     e.preventDefault();
     const text = query.trim();
-    if (!text) return;
+    if (!text || searching) return;
     // Links skip the metadata search entirely: yt-dlp resolves the URL
     // directly (play now; the server queues it automatically when busy).
     if (/^https?:\/\//i.test(text)) {
-      await admin(`/api/guilds/${guildId}/play`, {
-        method: "POST",
-        body: JSON.stringify({ query: text }),
-      });
-      setQuery("");
+      optimisticEnqueue(text, () =>
+        admin(`/api/guilds/${guildId}/play`, {
+          method: "POST",
+          body: JSON.stringify({ query: text }),
+        })
+      );
       return;
     }
+    setSearching(true);
     try {
       const list = await apiFetch<SearchHit[]>(`/api/search?q=${encodeURIComponent(text)}`);
       setHits(list);
@@ -316,24 +368,25 @@ export default function GuildPage() {
       // no permission or metadata provider down: treat the raw text as a
       // direct play query instead (yt-dlp resolves "artist - title" too)
       setHits([]);
-      await admin(`/api/guilds/${guildId}/play`, {
-        method: "POST",
-        body: JSON.stringify({ query: text }),
-      });
-      setQuery("");
-      return;
+      optimisticEnqueue(text, () =>
+        admin(`/api/guilds/${guildId}/play`, {
+          method: "POST",
+          body: JSON.stringify({ query: text }),
+        })
+      );
+    } finally {
+      setSearching(false);
     }
   }
 
-  async function enqueueHit(hit: SearchHit, atEnd = true) {
+  async function enqueueHit(hit: SearchHit, where: "end" | "next" = "end") {
     const q = `${hit.artist} - ${hit.title}`;
-    await admin(atEnd ? `/api/guilds/${guildId}/queue` : `/api/guilds/${guildId}/play`, {
-      method: "POST",
-      body: JSON.stringify({ query: q }),
-    });
-    setQuery("");
-    setHits([]);
-    setPreviewing(null);
+    optimisticEnqueue(q, () =>
+      admin(`/api/guilds/${guildId}/queue`, {
+        method: "POST",
+        body: JSON.stringify(where === "next" ? { query: q, position: 0 } : { query: q }),
+      })
+    );
   }
 
   // ---------- progress interpolation ----------
@@ -360,10 +413,13 @@ export default function GuildPage() {
   const needle = favQuery.trim().toLowerCase();
   const favFiltered = (favorites ?? []).filter((f) =>
     !needle || (f.title + " " + f.webpage_url).toLowerCase().includes(needle));
-  const playFavorite = (fav: Favorite, atEnd = true) =>
-    admin(atEnd ? `/api/guilds/${guildId}/queue` : `/api/guilds/${guildId}/play`, {
+  const favPages = Math.max(1, Math.ceil(favFiltered.length / FAV_PAGE_SIZE));
+  const fSafe = Math.min(favPage, favPages - 1);
+  const favPageItems = favFiltered.slice(fSafe * FAV_PAGE_SIZE, (fSafe + 1) * FAV_PAGE_SIZE);
+  const playFavorite = (fav: Favorite) =>
+    admin(`/api/guilds/${guildId}/queue`, {
       method: "POST",
-      body: JSON.stringify({ query: fav.search_query || fav.webpage_url }),
+      body: JSON.stringify({ query: fav.search_query || fav.webpage_url, position: 0 }),
     });
 
   const controlCls = "px-4 py-2 rounded-lg text-xs font-medium transition disabled:opacity-40";
@@ -407,6 +463,18 @@ export default function GuildPage() {
       </header>
 
       {error && <p className="text-xs text-red-400 mb-4">{error}</p>}
+
+      {canQueue && (
+        <div className="flex justify-end mb-4">
+          <button
+            onClick={() => setAddOpen(true)}
+            className="px-4 py-2 rounded-lg bg-accent text-inverse text-sm font-medium hover:bg-accent/90 transition flex items-center gap-1.5"
+          >
+            <PlusIcon />
+            Add music
+          </button>
+        </div>
+      )}
 
       {/* Now playing: centered title, progress line, centered controls */}
       <section className="bg-card border border-border rounded-xl p-6 mb-6">
@@ -478,56 +546,6 @@ export default function GuildPage() {
         </p>
       </section>
 
-      {canQueue && (
-        <section className="bg-card border border-border rounded-xl p-4 mb-6">
-          <h2 className="text-sm font-medium mb-3">Add music</h2>
-          <form onSubmit={runSearch} className="flex gap-2 mb-3">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              disabled={!canQueue}
-              placeholder="Search a track or paste a YouTube / SoundCloud link to play it"
-              className="flex-1 px-3 py-2 rounded-lg bg-surface border border-border text-sm text-primary placeholder:text-muted focus:outline-none focus:border-accent/60 disabled:opacity-50"
-            />
-            <button type="submit" disabled={!canQueue} className="px-4 py-2 rounded-lg bg-accent text-inverse text-sm font-medium hover:bg-accent/90 transition disabled:opacity-50">
-              Search / Play
-            </button>
-          </form>
-          {hits.length > 0 && (
-            <div className="space-y-2">
-              {hits.map((hit) => (
-                <div key={hit.id} className="flex items-center gap-3 bg-surface border border-border rounded-lg p-2">
-                  {hit.cover && <img src={hit.cover} alt="" className="w-10 h-10 rounded object-cover" />}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-primary truncate">{hit.title}</p>
-                    <p className="text-xs text-muted truncate">{hit.artist} · {hit.album}</p>
-                  </div>
-                  <button onClick={() => setPreviewing(previewing === hit.preview ? null : hit.preview)}
-                    className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition">
-                    {previewing === hit.preview ? "Stop" : "Preview"}
-                  </button>
-                  {canQueue && (
-                    <button onClick={() => enqueueHit(hit)}
-                      className="px-3 py-1 rounded bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition">Queue</button>
-                  )}
-                  {canQueue && (
-                    <button onClick={() => enqueueHit(hit, false)}
-                      className="px-3 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition">Play now</button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-          {previewing && (
-            <div className="mt-3">
-              <audio src={previewing} controls autoPlay className="w-full" />
-              <p className="text-xs text-muted mt-1">30s preview from the metadata provider</p>
-            </div>
-          )}
-        </section>
-      )}
-
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <section className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="px-4 py-3 border-b border-border flex items-center justify-between">
@@ -547,7 +565,7 @@ export default function GuildPage() {
               return (
                 <div
                   key={`${item.id}-${item.position}`}
-                  draggable={canQueueManage}
+                  draggable={canQueueManage && !item.pending}
                   onDragStart={() => setDragIndex(globalIndex)}
                   onDragEnd={() => {
                     setDragIndex(null);
@@ -581,19 +599,25 @@ export default function GuildPage() {
                     <span className="w-3" />
                   )}
                   <span className="text-xs text-muted w-6 text-right">{globalIndex + 1}</span>
-                  <p className="flex-1 text-sm text-primary truncate">{item.title}</p>
-                  <button
-                    onClick={() => toggleFavorite(item.title, item.webpage_url, item.search_query)}
-                    title={favUrls.has(item.webpage_url) ? "Remove from favorites" : "Add to favorites"}
-                    className={`p-1.5 rounded transition ${
-                      favUrls.has(item.webpage_url) ? "text-amber-400" : "text-muted hover:text-secondary"
-                    }`}
-                  >
-                    <StarIcon filled={favUrls.has(item.webpage_url)} />
-                  </button>
-                  {canQueueManage && (
+                  <p className="flex-1 text-sm truncate">
+                    <span className={item.pending ? "text-muted" : "text-primary"}>{item.title}</span>
+                    {item.pending && <span className="text-xs text-muted"> · adding…</span>}
+                  </p>
+                  {!item.pending && (
+                    <button
+                      onClick={() => toggleFavorite(item.title, item.webpage_url, item.search_query)}
+                      title={favUrls.has(item.webpage_url) ? "Remove from favorites" : "Add to favorites"}
+                      className={`p-1.5 rounded transition ${
+                        favUrls.has(item.webpage_url) ? "text-amber-400" : "text-muted hover:text-secondary"
+                      }`}
+                    >
+                      <StarIcon filled={favUrls.has(item.webpage_url)} />
+                    </button>
+                  )}
+                  {canQueueManage && !item.pending && (
                     <button onClick={() => admin(`/api/guilds/${guildId}/queue/${item.id}`, { method: "DELETE" })}
-                      className="p-1.5 rounded bg-card border border-border text-red-400 hover:text-red-300 transition"><XIcon /></button>
+                      title="Remove from queue"
+                      className="p-1.5 rounded-md text-muted opacity-60 hover:opacity-100 hover:text-red-400 hover:bg-red-500/10 transition"><XIcon /></button>
                   )}
                 </div>
               );
@@ -627,7 +651,7 @@ export default function GuildPage() {
               <div key={item.id} className="flex items-center gap-2 bg-surface border border-border rounded-lg p-2">
                 <p className="flex-1 text-sm text-primary truncate">{item.title}</p>
                 <span className="text-xs text-muted whitespace-nowrap">
-                  {new Date(item.played_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                  {new Date(item.played_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
                 </span>
                 <button
                   onClick={() => toggleFavorite(item.title, item.webpage_url)}
@@ -667,35 +691,137 @@ export default function GuildPage() {
             <span className="text-xs text-muted">{favorites?.length ?? 0}</span>
           </div>
         </div>
-        <div className="p-4 space-y-1 min-h-[5rem]">
+        <div className="p-4 min-h-[8rem]">
           {favFiltered.length === 0 && (
             <p className="text-xs text-muted">
               {favQuery.trim() ? "No favorite matches the search" : "Star a track in the queue or the history to keep it here"}
             </p>
           )}
-          {favFiltered.map((fav) => (
-            <div key={fav.id} className="flex items-center gap-2 bg-surface border border-border rounded-lg p-2">
-              <span className="text-amber-400 flex-none"><StarIcon filled /></span>
-              <p className="flex-1 text-sm text-primary truncate">{fav.title}</p>
-              {canQueue && (
-                <button onClick={() => playFavorite(fav, false)}
-                  className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition">Play now</button>
-              )}
-              {canQueue && (
-                <button onClick={() => playFavorite(fav)}
-                  className="px-2 py-1 rounded bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition">Queue</button>
-              )}
-              <button
-                onClick={() => toggleFavorite(fav.title, fav.webpage_url, fav.search_query)}
-                title="Remove from favorites"
-                className="p-1.5 rounded bg-card border border-border text-xs text-red-400 hover:text-red-300 transition"
-              >
-                <XIcon />
-              </button>
-            </div>
-          ))}
+          <div className="grid md:grid-cols-2 gap-x-4 gap-y-1">
+            {favPageItems.map((fav) => (
+              <div key={fav.id} className="flex items-center gap-2 bg-surface border border-border rounded-lg p-2">
+                <button
+                  onClick={() => toggleFavorite(fav.title, fav.webpage_url, fav.search_query)}
+                  title="Remove from favorites"
+                  className="text-amber-400 flex-none hover:text-muted transition"
+                >
+                  <StarIcon filled />
+                </button>
+                <p className="flex-1 text-sm text-primary truncate">{fav.title}</p>
+                {canQueue && (
+                  <button onClick={() => playFavorite(fav)} title="Play right after the current track"
+                    className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition whitespace-nowrap">Play next</button>
+                )}
+                {canQueue && (
+                  <button onClick={() => { playFavorite(fav); }}
+                    className="px-2 py-1 rounded bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition">Queue</button>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
+        {favPages > 1 && (
+          <div className="px-4 py-3 border-t border-border flex items-center justify-center gap-3 text-xs text-muted">
+            <button onClick={() => setFavPage(fSafe - 1)} disabled={fSafe === 0} title="Previous page"
+              className="p-1.5 rounded bg-card border border-border hover:text-primary transition disabled:opacity-40"><ChevronIcon dir="left" /></button>
+            <span>{fSafe + 1} / {favPages}</span>
+            <button onClick={() => setFavPage(fSafe + 1)} disabled={fSafe >= favPages - 1}
+              className="p-1.5 rounded bg-card border border-border hover:text-primary transition disabled:opacity-40"><ChevronIcon dir="right" /></button>
+          </div>
+        )}
       </section>
+
+      {/* Add-music dialog: search, results, previews; Escape/backdrop/X close.
+          Enqueueing keeps the dialog open so several tracks can be added. */}
+      {addOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+          onClick={() => setAddOpen(false)}
+        >
+          <div
+            className="bg-card border border-border rounded-2xl w-full max-w-xl shadow-2xl flex flex-col max-h-[85vh]"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 flex items-center gap-3 border-b border-border">
+              <div className="w-9 h-9 rounded-lg bg-accent/15 text-accent grid place-items-center flex-none">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4.5 h-4.5" width="18" height="18" aria-hidden="true">
+                  <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
+                </svg>
+              </div>
+              <div className="flex-1 min-w-0">
+                <h2 className="text-sm font-semibold">Add music</h2>
+                <p className="text-xs text-muted">Search a track or paste a YouTube / SoundCloud link</p>
+              </div>
+              <button onClick={() => setAddOpen(false)} title="Close"
+                className="p-1.5 rounded-md text-muted hover:text-primary hover:bg-surface transition"><XIcon /></button>
+            </div>
+
+            <div className="px-5 py-4 border-b border-border">
+              <form onSubmit={runSearch} className="flex gap-2">
+                <input
+                  ref={searchRef}
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Artist - title, or a direct link"
+                  className="flex-1 px-3 py-2 rounded-lg bg-surface border border-border text-sm text-primary placeholder:text-muted focus:outline-none focus:border-accent/60"
+                />
+                <button type="submit" disabled={searching} className="px-4 py-2 rounded-lg bg-accent text-inverse text-sm font-medium hover:bg-accent/90 transition disabled:opacity-50">
+                  {searching ? "Searching…" : "Search"}
+                </button>
+              </form>
+              {searching && <p className="text-xs text-muted mt-2">Searching the metadata provider…</p>}
+            </div>
+
+            <div className="px-5 py-4 overflow-y-auto flex-1 space-y-2">
+              {hits.length > 0 && (
+                <p className="text-xs text-muted">Star a track, preview it, or send it to the queue.</p>
+              )}
+              {hits.map((hit) => {
+                const favUrl = hit.link || `deezer:${hit.id}`;
+                const q = `${hit.artist} - ${hit.title}`;
+                return (
+                  <div key={hit.id} className="flex items-center gap-3 bg-surface border border-border rounded-lg p-2">
+                    {hit.cover && <img src={hit.cover} alt="" className="w-10 h-10 rounded object-cover flex-none" />}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-primary truncate">{hit.title}</p>
+                      <p className="text-xs text-muted truncate">{hit.artist} · {hit.album}</p>
+                    </div>
+                    <button
+                      onClick={() => toggleFavorite(q, favUrl, q)}
+                      title={favUrls.has(favUrl) ? "Remove from favorites" : "Add to favorites"}
+                      className={`p-1.5 rounded transition ${favUrls.has(favUrl) ? "text-amber-400" : "text-muted hover:text-secondary"}`}
+                    >
+                      <StarIcon filled={favUrls.has(favUrl)} />
+                    </button>
+                    <button onClick={() => setPreviewing(previewing === hit.preview ? null : hit.preview)}
+                      className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition whitespace-nowrap">
+                      {previewing === hit.preview ? "Stop" : "Preview"}
+                    </button>
+                    {canQueue && (
+                      <button onClick={() => enqueueHit(hit, "next")}
+                        className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition whitespace-nowrap">Play next</button>
+                    )}
+                    {canQueue && (
+                      <button onClick={() => enqueueHit(hit, "end")}
+                        className="px-2 py-1 rounded bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition whitespace-nowrap">Queue</button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {previewing && (
+              <div className="px-5 py-4 border-t border-border">
+                <audio src={previewing} controls autoPlay className="w-full" />
+                <p className="text-xs text-muted mt-1">30s preview from the metadata provider</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }

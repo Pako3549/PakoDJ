@@ -1093,6 +1093,18 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         await database.clear_queue(guild_id)
         return {"cleared": True}
 
+    _search_session_holder: dict = {"session": None}
+
+    def _search_session():
+        """Lazily created keep-alive session for the Deezer proxy; lives for
+        the whole process (single event loop, single use)."""
+        import aiohttp
+        session = _search_session_holder["session"]
+        if session is None or session.closed:
+            session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6))
+            _search_session_holder["session"] = session
+        return session
+
     @app.get("/api/search")
     async def search(q: str, user: dict = Depends(_require_permission('queue'))):
         """Thin proxy for the free Deezer public metadata API (docs/meta layer:
@@ -1109,12 +1121,15 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         if cached and cached[0] > now_ts:
             return cached[1]
 
+        # Shared keep-alive session: a per-request session paid a full TCP+TLS
+        # handshake to Deezer on every search. Bounded by a timeout so a slow
+        # provider answers 502 instead of hanging the panel.
         import aiohttp  # provided by discord.py
-        async with aiohttp.ClientSession() as session:
-            async with session.get('https://api.deezer.com/search/track', params={'q': q, 'limit': 12}) as resp:
-                if resp.status != 200:
-                    raise HTTPException(status_code=502, detail="Metadata provider unavailable")
-                raw = await resp.json()
+        session = _search_session()
+        async with session.get('https://api.deezer.com/search/track', params={'q': q, 'limit': 12}) as resp:
+            if resp.status != 200:
+                raise HTTPException(status_code=502, detail="Metadata provider unavailable")
+            raw = await resp.json()
         results = [
             {
                 "id": item.get('id'),
@@ -1124,6 +1139,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
                 "cover": ((item.get('album') or {}).get('cover_medium')),
                 "preview": item.get('preview'),
                 "duration": item.get('duration'),
+                "link": item.get('link'),
             }
             for item in (raw.get('data') or []) if item.get('id') is not None
         ]

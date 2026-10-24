@@ -681,7 +681,7 @@ export default function UsersPage() {
         return (
           <>
             <div
-              className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+              className="fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-4 overflow-y-auto"
               onClick={() => closeEditor(u.id)}
             >
               <div
