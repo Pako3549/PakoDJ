@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { apiFetch, getToken } from "@/lib/api";
 import { useAccount, PERMISSIONS } from "@/lib/auth";
-import { useEscapeBack } from "@/lib/useEscapeBack";
+import { goBack, useEscapeBack } from "@/lib/useEscapeBack";
 import { readCache, writeCache } from "@/lib/cache";
 
 // Per-guild overrides never carry manage_users: account administration is
@@ -117,6 +117,8 @@ function Chip({
 
 export default function UsersPage() {
   const { account, loading, error: authError } = useAccount("manage_users");
+  const location = useLocation();
+  const navigate = useNavigate();
   // Instant-render caches; "null" renders as placeholders, never fake zeros.
   const [users, setUsers] = useState<User[] | null>(() => readCache<User[]>("pakodj:users", 60_000));
   const [requests, setRequests] = useState<AccessRequest[] | null>(() =>
@@ -468,9 +470,10 @@ export default function UsersPage() {
     <main className="max-w-3xl mx-auto px-4 py-6">
       <header className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
-          <Link to="/" className="px-3 py-2 rounded-lg bg-card border border-border text-sm text-secondary hover:text-primary transition">
+          <button onClick={() => navigate(goBack(location.pathname))} title="Back"
+            className="px-3 py-2 rounded-lg bg-card border border-border text-sm text-secondary hover:text-primary transition">
             ←
-          </Link>
+          </button>
           <div>
             <h1 className="text-lg font-semibold">Users</h1>
             <p className="text-xs text-muted">

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useLocation, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { apiFetch, clearToken } from "@/lib/api";
 import { useAccount, usePermissionWatch } from "@/lib/auth";
 import { useStreamEvents } from "@/lib/live";
-import { useEscapeBack } from "@/lib/useEscapeBack";
+import { goBack, useEscapeBack } from "@/lib/useEscapeBack";
 import ThemeToggle from "@/components/ThemeToggle";
 import ErrorBox from "@/components/ErrorBox";
 
@@ -129,6 +129,7 @@ function StarIcon({ filled }: { filled: boolean }) {
 export default function GuildPage() {
   const { guildId } = useParams<{ guildId: string }>();
   const location = useLocation();
+  const navigate = useNavigate();
   const { account, loading, error: authError } = useAccount();
   usePermissionWatch(account);
   // Granular gating: each control group maps to its own permission key,
@@ -163,6 +164,7 @@ export default function GuildPage() {
   const [favQuery, setFavQuery] = useState("");
   const [favPage, setFavPage] = useState(0);
   const [searching, setSearching] = useState(false);
+  const [playCount, setPlayCount] = useState(1);
   // Progress baseline: the position reported by the last status fetch plus
   // when it was fetched; the 1s ticker interpolates between fetches.
   const [posSync, setPosSync] = useState<{ position: number | null; at: number }>({ position: null, at: 0 });
@@ -327,13 +329,19 @@ export default function GuildPage() {
   // Optimistic enqueue: the track shows up in the list right away with the
   // raw query as placeholder; the server confirmation (which resolves the
   // canonical data via yt-dlp) reconciles the truth through the SSE reload.
-  function optimisticEnqueue(label: string, fire: () => Promise<void>) {
+  function optimisticEnqueue(label: string, fire: () => Promise<void>, count = 1) {
     setQuery("");
     setHits([]);
     setPreviewing(null);
     setQueue((cur) => [
       ...cur,
-      { id: -Date.now(), title: label, webpage_url: "", position: cur.length + 1, pending: true },
+      ...Array.from({ length: count }, (_, i) => ({
+        id: -Date.now() - i,
+        title: label,
+        webpage_url: "",
+        position: cur.length + i + 1,
+        pending: true,
+      })),
     ]);
     (async () => {
       try {
@@ -352,12 +360,15 @@ export default function GuildPage() {
     // Links skip the metadata search entirely: yt-dlp resolves the URL
     // directly (play now; the server queues it automatically when busy).
     if (/^https?:\/\//i.test(text)) {
-      optimisticEnqueue(text, () =>
-        admin(`/api/guilds/${guildId}/play`, {
-          method: "POST",
-          body: JSON.stringify({ query: text }),
-        })
-      );
+      const count = playCount;
+      optimisticEnqueue(text, async () => {
+        for (let i = 0; i < count; i++) {
+          await admin(`/api/guilds/${guildId}/play`, {
+            method: "POST",
+            body: JSON.stringify({ query: text }),
+          });
+        }
+      }, count);
       return;
     }
     setSearching(true);
@@ -381,12 +392,15 @@ export default function GuildPage() {
 
   async function enqueueHit(hit: SearchHit, where: "end" | "next" = "end") {
     const q = `${hit.artist} - ${hit.title}`;
-    optimisticEnqueue(q, () =>
-      admin(`/api/guilds/${guildId}/queue`, {
-        method: "POST",
-        body: JSON.stringify(where === "next" ? { query: q, position: 0 } : { query: q }),
-      })
-    );
+    const count = Math.max(1, Math.min(10, playCount || 1));
+    optimisticEnqueue(q, async () => {
+      for (let i = 0; i < count; i++) {
+        await admin(`/api/guilds/${guildId}/queue`, {
+          method: "POST",
+          body: JSON.stringify(where === "next" ? { query: q, position: i } : { query: q }),
+        });
+      }
+    }, count);
   }
 
   // ---------- progress interpolation ----------
@@ -428,9 +442,10 @@ export default function GuildPage() {
     <main className="max-w-7xl mx-auto px-4 py-6">
       <header className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
-          <Link to="/" title="Back to the dashboard" className="p-2.5 rounded-lg bg-card border border-border text-secondary hover:text-primary transition">
+          <button onClick={() => navigate(goBack(location.pathname + location.search))} title="Back"
+            className="p-2.5 rounded-lg bg-card border border-border text-secondary hover:text-primary transition">
             <ArrowLeftIcon />
-          </Link>
+          </button>
           <h1 className="text-lg font-semibold">{guildName || "Guild"}</h1>
         </div>
         <div className="flex items-center gap-3">
@@ -440,7 +455,6 @@ export default function GuildPage() {
             )}
             <span className="hidden sm:inline">{account.username}</span>
           </div>
-          <span className={`w-2.5 h-2.5 rounded-full ${status?.playing ? "bg-accent" : "bg-muted"}`} />
           {account.permissions.includes("manage_users") && (
             <Link
               to="/users"
@@ -454,7 +468,7 @@ export default function GuildPage() {
               clearToken();
               window.location.href = "/login";
             }}
-            className="px-4 py-2 rounded-lg bg-red-500/10 text-red-400 text-sm font-medium hover:bg-red-500/20 transition"
+            className="px-4 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-400 hover:bg-red-500/20 transition"
           >
             Logout
           </button>
@@ -752,7 +766,7 @@ export default function GuildPage() {
               </div>
               <div className="flex-1 min-w-0">
                 <h2 className="text-sm font-semibold">Add music</h2>
-                <p className="text-xs text-muted">Search a track or paste a YouTube / SoundCloud link</p>
+                <p className="text-xs text-muted">Search a track or paste a link</p>
               </div>
               <button onClick={() => setAddOpen(false)} title="Close"
                 className="p-1.5 rounded-md text-muted hover:text-primary hover:bg-surface transition"><XIcon /></button>
@@ -765,9 +779,22 @@ export default function GuildPage() {
                   type="text"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Artist - title, or a direct link"
                   className="flex-1 px-3 py-2 rounded-lg bg-surface border border-border text-sm text-primary placeholder:text-muted focus:outline-none focus:border-accent/60"
                 />
+                <div
+                  className="flex items-center gap-1 rounded-lg bg-surface border border-border px-2 py-1.5"
+                  title="How many times to add the track (Play next keeps the order)"
+                >
+                  <span className="text-xs text-muted">×</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={playCount}
+                    onChange={(e) => setPlayCount(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
+                    className="w-9 bg-transparent text-xs text-primary text-center focus:outline-none"
+                  />
+                </div>
                 <button type="submit" disabled={searching} className="px-4 py-2 rounded-lg bg-accent text-inverse text-sm font-medium hover:bg-accent/90 transition disabled:opacity-50">
                   {searching ? "Searching…" : "Search"}
                 </button>

@@ -7,11 +7,13 @@ import LoginPage from "./pages/LoginPage";
 import OauthCallbackPage from "./pages/OauthCallbackPage";
 import GuildPage from "./pages/GuildPage";
 import UsersPage from "./pages/UsersPage";
+import { NavTracker } from "./lib/useEscapeBack";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <BrowserRouter>
+      <NavTracker />
       <Routes>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/login" element={<LoginPage />} />
