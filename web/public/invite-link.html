@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Discord invite link builder — PakoDJ</title>
+<link rel="icon" type="image/png" href="bot.png">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0e1014;
+    --card: #171a21;
+    --card-2: #1d212a;
+    --border: #2a2f3a;
+    --text: #e6e8ec;
+    --muted: #9aa1ad;
+    --accent: #5865f2;
+    --accent-soft: rgba(88, 101, 242, .14);
+    --green: #2f9e63;
+    --green-soft: rgba(47, 158, 99, .15);
+    --red: #e0484b;
+    --red-soft: rgba(224, 72, 75, .12);
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background:
+      radial-gradient(900px 420px at 85% -10%, rgba(88, 101, 242, .16), transparent 60%),
+      radial-gradient(700px 380px at -10% 110%, rgba(47, 158, 99, .08), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 56px; }
+
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 26px; }
+  .logo {
+    width: 46px; height: 46px; border-radius: 12px; flex: none; overflow: hidden;
+    background: linear-gradient(135deg, #5865f2, #3c45a5);
+    box-shadow: 0 6px 18px rgba(88, 101, 242, .35);
+  }
+  .logo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  header h1 { font-size: 19px; margin: 0; letter-spacing: -.01em; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+
+  .layout { display: grid; grid-template-columns: 1.25fr .9fr; gap: 18px; align-items: start; }
+  @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } .out { position: static !important; } }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px;
+  }
+  .card h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 0 0 12px;
+  }
+
+  label.field { display: block; font-weight: 600; font-size: 13px; margin: 0 0 6px; }
+  .idrow { display: flex; gap: 8px; }
+  input[type="text"] {
+    flex: 1; width: 100%; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--card-2); color: var(--text);
+    font: 13px/1 ui-monospace, "Cascadia Code", monospace; outline: none;
+    transition: border-color .15s;
+  }
+  input[type="text"]:focus { border-color: var(--accent); }
+
+  .presets { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  button { font: inherit; font-weight: 600; cursor: pointer; border: 0; border-radius: 9px; transition: filter .15s, transform .05s; }
+  button:active { transform: translateY(1px); }
+  .btn-primary { background: var(--accent); color: #fff; padding: 9px 15px; }
+  .btn-ghost { background: var(--card-2); color: var(--text); border: 1px solid var(--border); padding: 9px 15px; }
+  .btn-primary:hover, .btn-ghost:hover { filter: brightness(1.12); }
+
+  .groups { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+  @media (max-width: 520px) { .groups { grid-template-columns: 1fr; } }
+  .group { background: var(--card-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+  .group h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--muted); margin: 0 0 8px;
+  }
+  .perm {
+    display: flex; align-items: center; gap: 9px;
+    padding: 6px 8px; margin: 0 -4px; border-radius: 8px;
+    cursor: pointer; user-select: none; transition: background .12s;
+  }
+  .perm:hover { background: rgba(255, 255, 255, .04); }
+  .perm input { display: none; }
+  .tick {
+    width: 17px; height: 17px; flex: none; border-radius: 5px;
+    border: 1.5px solid #3a4150; display: grid; place-items: center;
+    transition: all .12s;
+  }
+  .perm.on .tick { background: var(--accent); border-color: var(--accent); }
+  .tick svg { width: 11px; height: 11px; opacity: 0; transition: opacity .12s; }
+  .perm.on .tick svg { opacity: 1; }
+  .perm .name { flex: 1; font-size: 13px; color: var(--muted); transition: color .12s; }
+  .perm.on .name { color: var(--text); }
+  .perm .bit { font-size: 10.5px; color: #565d69; font-variant-numeric: tabular-nums; }
+
+  .out { position: sticky; top: 20px; }
+  .stat { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px dashed var(--border); }
+  .stat:last-of-type { border-bottom: 0; }
+  .stat .k { color: var(--muted); font-size: 12.5px; }
+  .stat .v { font-weight: 700; font-variant-numeric: tabular-nums; font-size: 15px; }
+  .match {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11.5px; font-weight: 700; letter-spacing: .03em;
+    padding: 3px 9px; border-radius: 999px; text-transform: uppercase;
+  }
+  .match.ok { color: #6ee7a0; background: var(--green-soft); }
+  .match.no { color: var(--muted); background: rgba(255, 255, 255, .05); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .chip {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    background: var(--accent-soft); color: #aab4ff; border: 1px solid rgba(88, 101, 242, .35);
+  }
+  .chip.none { background: rgba(255, 255, 255, .04); color: var(--muted); border-color: var(--border); }
+  code#url {
+    display: block; word-break: break-all;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; margin: 10px 0 12px; font-size: 12.5px; line-height: 1.6;
+    font-family: ui-monospace, "Cascadia Code", monospace;
+  }
+  .copy { width: 100%; background: var(--green); color: #fff; padding: 11px; }
+  .hint { color: var(--muted); font-size: 12px; margin: 14px 0 0; }
+  .hint b { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">
+      <img src="bot.png" alt="PakoDJ">
+    </div>
+    <div>
+      <h1>Discord invite link builder</h1>
+      <p>PakoDJ permission tool — offline, login-free, nothing leaves this page</p>
+    </div>
+  </header>
+
+  <div class="layout">
+    <div class="card">
+      <h2>Application</h2>
+      <label class="field" for="client">Application ID</label>
+      <div class="idrow">
+        <input type="text" id="client" placeholder="e.g. 1317889379813031946" inputmode="numeric" spellcheck="false">
+      </div>
+      <div class="presets">
+        <button type="button" class="btn-primary" id="pakodj">PakoDJ preset</button>
+        <button type="button" class="btn-ghost" id="clear">Clear all</button>
+      </div>
+
+      <h2 style="margin-top:18px">Permissions</h2>
+      <div class="groups" id="groups"></div>
+    </div>
+
+    <div class="card out">
+      <h2>Result</h2>
+      <div class="stat">
+        <span class="k">Permission integer</span>
+        <span class="v" id="int">0</span>
+      </div>
+      <div class="stat">
+        <span class="k">Preset match</span>
+        <span class="match no" id="match">custom</span>
+      </div>
+      <div class="stat" style="display:block">
+        <span class="k">Granted</span>
+        <div class="chips" id="chips"></div>
+      </div>
+      <div class="stat" style="display:block; border-bottom:0">
+        <span class="k">Invite URL</span>
+        <code id="url"></code>
+        <button type="button" class="copy" id="copy">Copy URL</button>
+      </div>
+      <p class="hint" id="warn" hidden style="color: #f0b132"></p>
+      <p class="hint">
+        <b>Keep it clean:</b> never add <b>response_type</b> or <b>redirect_uri</b> to an
+        invite link — those belong to the user login flow, which the web panel builds on
+        its own. Prefix commands also need the <b>Message Content Intent</b> enabled in
+        the Developer Portal.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// Canonical Discord permission bits (gateway permission integers).
+const PERMISSIONS = [
+  ["Create Instant Invite", 0, "General"],
+  ["View Audit Log", 7, "General"],
+  ["View Channels", 10, "General"],
+  ["View Guild Insights", 19, "General"],
+  ["Change Nickname", 26, "General"],
+  ["Manage Nicknames", 27, "General"],
+  ["Kick Members", 1, "Membership"],
+  ["Ban Members", 2, "Membership"],
+  ["Administrator", 3, "Membership"],
+  ["Moderate Members", 40, "Membership"],
+  ["Manage Channels", 4, "Channel"],
+  ["Manage Roles", 28, "Channel"],
+  ["Manage Webhooks", 29, "Channel"],
+  ["Manage Emojis and Stickers", 30, "Channel"],
+  ["Manage Threads", 34, "Channel"],
+  ["Add Reactions", 6, "Text"],
+  ["Send Messages", 11, "Text"],
+  ["Send TTS Messages", 12, "Text"],
+  ["Manage Messages", 13, "Text"],
+  ["Embed Links", 14, "Text"],
+  ["Attach Files", 15, "Text"],
+  ["Read Message History", 16, "Text"],
+  ["Mention Everyone", 17, "Text"],
+  ["Use External Emojis", 18, "Text"],
+  ["Use Application Commands", 31, "Text"],
+  ["Create Public Threads", 35, "Text"],
+  ["Create Private Threads", 36, "Text"],
+  ["Send Messages in Threads", 38, "Text"],
+  ["Connect", 20, "Voice"],
+  ["Speak", 21, "Voice"],
+  ["Mute Members", 22, "Voice"],
+  ["Deafen Members", 23, "Voice"],
+  ["Move Members", 24, "Voice"],
+  ["Use Voice Activity", 25, "Voice"],
+  ["Priority Speaker", 8, "Voice"],
+  ["Stream", 9, "Voice"],
+];
+
+// Exactly what PakoDJ needs: answer prefix commands and play in voice.
+const PAKODJ = ["View Channels", "Send Messages", "Embed Links", "Connect", "Speak"];
+const CLIENT_RE = /^\d{16,20}$/;
+
+const groupsEl = document.getElementById("groups");
+const byName = {};
+
+for (const g of [...new Set(PERMISSIONS.map(([, , gg]) => gg))]) {
+  const box = document.createElement("div");
+  box.className = "group";
+  const h = document.createElement("h3");
+  h.textContent = g;
+  box.appendChild(h);
+  for (const [name, bit] of PERMISSIONS.filter(([, , gg]) => gg === g)) {
+    const label = document.createElement("label");
+    label.className = "perm";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.dataset.bit = bit;
+    byName[name] = { cb, label };
+    cb.addEventListener("change", render);
+    label.appendChild(cb);
+    const tick = document.createElement("span");
+    tick.className = "tick";
+    tick.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    label.appendChild(tick);
+    const nm = document.createElement("span");
+    nm.className = "name";
+    nm.textContent = name;
+    label.appendChild(nm);
+    const bt = document.createElement("span");
+    bt.className = "bit";
+    bt.textContent = "1<<" + bit;
+    label.appendChild(bt);
+    box.appendChild(label);
+  }
+  groupsEl.appendChild(box);
+}
+
+function setChecks(fn) {
+  for (const [name, { cb }] of Object.entries(byName)) cb.checked = fn(name);
+  render();
+}
+function pakodjPreset() { setChecks((name) => PAKODJ.includes(name)); }
+function clearAll() { setChecks(() => false); }
+document.getElementById("pakodj").addEventListener("click", pakodjPreset);
+document.getElementById("clear").addEventListener("click", clearAll);
+document.getElementById("copy").addEventListener("click", function () {
+  navigator.clipboard.writeText(document.getElementById("url").textContent).then(() => {
+    this.textContent = "Copied";
+    setTimeout(() => { this.textContent = "Copy URL"; }, 1200);
+  }).catch(() => {});
+});
+
+function render() {
+  let mask = 0n;
+  const granted = [];
+  for (const [name, bit] of PERMISSIONS) {
+    if (byName[name].cb.checked) { mask |= 1n << BigInt(bit); granted.push(name); }
+  }
+  const isPreset = granted.length === PAKODJ.length && PAKODJ.every((n) => granted.includes(n));
+
+  // row highlight
+  for (const [name, { label }] of Object.entries(byName)) {
+    label.classList.toggle("on", byName[name].cb.checked);
+  }
+
+  const clientId = document.getElementById("client").value.trim();
+  const clientOk = CLIENT_RE.test(clientId);
+  const url = "https://discord.com/oauth2/authorize"
+    + "?client_id=" + (clientOk ? clientId : "<YOUR_APPLICATION_ID>")
+    + "&permissions=" + mask.toString()
+    + "&integration_type=0&scope=bot";
+
+  document.getElementById("int").textContent = mask.toString();
+  const match = document.getElementById("match");
+  match.textContent = isPreset ? "PakoDJ preset" : "custom";
+  match.className = "match " + (isPreset ? "ok" : "no");
+
+  const chips = document.getElementById("chips");
+  chips.textContent = "";
+  if (!granted.length) {
+    const c = document.createElement("span");
+    c.className = "chip none";
+    c.textContent = "none";
+    chips.appendChild(c);
+  } else {
+    for (const name of granted) {
+      const c = document.createElement("span");
+      c.className = "chip";
+      c.textContent = name;
+      chips.appendChild(c);
+    }
+  }
+  document.getElementById("url").textContent = url;
+
+  const warn = document.getElementById("warn");
+  warn.hidden = clientOk || !clientId;
+  warn.textContent = "The application id looks wrong: it is the numeric Application ID from the Developer Portal (16-20 digits).";
+}
+document.getElementById("client").addEventListener("input", render);
+pakodjPreset();
+</script>
+</body>
+</html>

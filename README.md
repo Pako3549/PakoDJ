@@ -37,6 +37,35 @@
     - `spotipy`
     - `asyncpg`
 - A **PostgreSQL** database reachable from the bot (with Docker Compose it is created automatically)
+
+### Inviting the bot
+
+Invite it with this URL (replace the application id with yours):
+
+```
+https://discord.com/oauth2/authorize?client_id=<YOUR_APPLICATION_ID>&permissions=3165184&integration_type=0&scope=bot
+```
+
+That bitmask is exactly what PakoDJ needs, nothing more:
+
+| Permission | Why |
+| --- | --- |
+| View Channels | see the text channels it answers in |
+| Send Messages | reply to commands |
+| Embed Links | optional nicety for richer replies |
+| Connect | join the voice channel |
+| Speak | play the audio |
+
+To build the link interactively, open `/invite-link.html` on the web panel origin (e.g. `http://localhost:8080/invite-link.html` in development, `https://dj.pako.uk/invite-link.html` in production): a login-free static page with the PakoDJ preset and the live permission bitmask. The source lives at `web/public/invite-link.html`.
+
+Do **not** add `response_type=code` or `redirect_uri` to the invite link: those belong to the user login flow, which the web panel builds on its own (with a one-shot state) — an invite that redirects to the panel callback would just land on "Login state expired".
+
+Two portal-side settings matter for prefix commands:
+- **Message Content Intent** must be enabled in the Developer Portal (Bot page): the bot reads `!play`-style command text
+- **Server Members Intent** is not required
+
+The web panel login uses the OAuth scopes `identify` + `guilds`, requested automatically by the "Login with Discord" button - nothing to configure beyond the redirect URI documented below.
+
 ## ⚙️ Setup
 
 ### 🐳 Docker Setup (Recommended)

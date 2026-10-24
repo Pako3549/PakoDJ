@@ -2,7 +2,9 @@ services:
   pakodj-dev:
     build: .
     container_name: pakodj-dev
-    restart: "no"
+    # unless-stopped everywhere: a host (Raspberry Pi) reboot brings the
+    # whole dev stack back without manual docker compose up.
+    restart: unless-stopped
     env_file:
       - bot/.env
     environment:
@@ -32,7 +34,7 @@ services:
       context: ./web
       target: dev
     container_name: pakodj-web-dev
-    restart: "no"
+    restart: unless-stopped
     depends_on:
       - pakodj-dev
     volumes:
@@ -47,7 +49,7 @@ services:
   nginx:
     image: nginx:stable-alpine
     container_name: pakodj-nginx-dev
-    restart: "no"
+    restart: unless-stopped
     depends_on:
       - web
       - pakodj-dev
