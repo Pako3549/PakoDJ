@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, clearToken } from "@/lib/api";
 import { useAccount, usePermissionWatch } from "@/lib/auth";
 import { useStreamEvents } from "@/lib/live";
 import { useEscapeBack } from "@/lib/useEscapeBack";
@@ -12,6 +12,7 @@ type QueueItem = {
   title: string;
   webpage_url: string;
   position: number;
+  search_query?: string | null;
 };
 
 type GuildStatus = {
@@ -41,6 +42,14 @@ type HistoryItem = {
   title: string;
   webpage_url: string;
   played_at: string;
+};
+
+type Favorite = {
+  id: number;
+  title: string;
+  webpage_url: string;
+  search_query?: string | null;
+  created_at: string;
 };
 
 const QUEUE_PAGE_SIZE = 15;
@@ -95,6 +104,16 @@ function ArrowLeftIcon() {
   );
 }
 
+function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15"
+      fill={filled ? "currentColor" : "none"}
+      stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true">
+      <polygon points="12 2.6 15 8.8 21.8 9.7 16.9 14.4 18.1 21.1 12 17.9 5.9 21.1 7.1 14.4 2.2 9.7 9 8.8" />
+    </svg>
+  );
+}
+
 export default function GuildPage() {
   const { guildId } = useParams<{ guildId: string }>();
   const location = useLocation();
@@ -125,6 +144,8 @@ export default function GuildPage() {
   const [previewing, setPreviewing] = useState<string | null>(null);
   const [history, setHistory] = useState<{ items: HistoryItem[]; total: number } | null>(null);
   const [historyPage, setHistoryPage] = useState(0);
+  const [favorites, setFavorites] = useState<Favorite[] | null>(null);
+  const [favQuery, setFavQuery] = useState("");
   // Progress baseline: the position reported by the last status fetch plus
   // when it was fetched; the 1s ticker interpolates between fetches.
   const [posSync, setPosSync] = useState<{ position: number | null; at: number }>({ position: null, at: 0 });
@@ -159,6 +180,44 @@ export default function GuildPage() {
     }
   }, [guildId]);
 
+  const fetchFavorites = useCallback(async () => {
+    try {
+      setFavorites(await apiFetch<Favorite[]>("/api/favorites"));
+    } catch {
+      // personal data: a failure must not break the music page
+      setFavorites((f) => f ?? []);
+    }
+  }, []);
+
+  // Star/unstar from queue or history: optimistic on the local list, the
+  // server is the source of truth on the next fetch.
+  const toggleFavorite = useCallback(async (title: string, webpageUrl: string, searchQuery?: string | null) => {
+    const current = favorites ?? [];
+    const existing = current.find((f) => f.webpage_url === webpageUrl);
+    if (existing) {
+      setFavorites(current.filter((f) => f.id !== existing.id));
+      try {
+        await apiFetch(`/api/favorites/${existing.id}`, { method: "DELETE" });
+      } catch {
+        await fetchFavorites();
+      }
+    } else {
+      try {
+        const res = await apiFetch<{ favorite_id: number }>("/api/favorites", {
+          method: "POST",
+          body: JSON.stringify({ title, webpage_url: webpageUrl, search_query: searchQuery ?? null }),
+        });
+        setFavorites([
+          { id: res.favorite_id, title, webpage_url: webpageUrl, search_query: searchQuery ?? null, created_at: new Date().toISOString() },
+          ...current,
+        ]);
+      } catch (err) {
+        setError((err as Error).message);
+        await fetchFavorites();
+      }
+    }
+  }, [favorites, fetchFavorites]);
+
   useEffect(() => {
     if (!account) return;
     if (guildId) {
@@ -172,7 +231,8 @@ export default function GuildPage() {
     }
     reloadData();
     fetchHistory(0);
-  }, [account, guildId, reloadData, fetchHistory]);
+    fetchFavorites();
+  }, [account, guildId, reloadData, fetchHistory, fetchFavorites]);
 
   // Live playback push: the bot signals every state change (track start,
   // stop, pause, skip) on the shared SSE stream — no polling loops.
@@ -295,6 +355,17 @@ export default function GuildPage() {
   const hSafe = Math.min(historyPage, hPages - 1);
   const active = Boolean(status?.playing || status?.paused);
 
+  // ---------- favorites ----------
+  const favUrls = new Set((favorites ?? []).map((f) => f.webpage_url));
+  const needle = favQuery.trim().toLowerCase();
+  const favFiltered = (favorites ?? []).filter((f) =>
+    !needle || (f.title + " " + f.webpage_url).toLowerCase().includes(needle));
+  const playFavorite = (fav: Favorite, atEnd = true) =>
+    admin(atEnd ? `/api/guilds/${guildId}/queue` : `/api/guilds/${guildId}/play`, {
+      method: "POST",
+      body: JSON.stringify({ query: fav.search_query || fav.webpage_url }),
+    });
+
   const controlCls = "px-4 py-2 rounded-lg text-xs font-medium transition disabled:opacity-40";
 
   return (
@@ -314,6 +385,23 @@ export default function GuildPage() {
             <span className="hidden sm:inline">{account.username}</span>
           </div>
           <span className={`w-2.5 h-2.5 rounded-full ${status?.playing ? "bg-accent" : "bg-muted"}`} />
+          {account.permissions.includes("manage_users") && (
+            <Link
+              to="/users"
+              className="px-4 py-2 rounded-lg bg-card border border-border text-sm text-secondary hover:text-primary transition"
+            >
+              Users
+            </Link>
+          )}
+          <button
+            onClick={() => {
+              clearToken();
+              window.location.href = "/login";
+            }}
+            className="px-4 py-2 rounded-lg bg-red-500/10 text-red-400 text-sm font-medium hover:bg-red-500/20 transition"
+          >
+            Logout
+          </button>
           <ThemeToggle />
         </div>
       </header>
@@ -494,6 +582,15 @@ export default function GuildPage() {
                   )}
                   <span className="text-xs text-muted w-6 text-right">{globalIndex + 1}</span>
                   <p className="flex-1 text-sm text-primary truncate">{item.title}</p>
+                  <button
+                    onClick={() => toggleFavorite(item.title, item.webpage_url, item.search_query)}
+                    title={favUrls.has(item.webpage_url) ? "Remove from favorites" : "Add to favorites"}
+                    className={`p-1.5 rounded transition ${
+                      favUrls.has(item.webpage_url) ? "text-amber-400" : "text-muted hover:text-secondary"
+                    }`}
+                  >
+                    <StarIcon filled={favUrls.has(item.webpage_url)} />
+                  </button>
                   {canQueueManage && (
                     <button onClick={() => admin(`/api/guilds/${guildId}/queue/${item.id}`, { method: "DELETE" })}
                       className="p-1.5 rounded bg-card border border-border text-red-400 hover:text-red-300 transition"><XIcon /></button>
@@ -532,6 +629,15 @@ export default function GuildPage() {
                 <span className="text-xs text-muted whitespace-nowrap">
                   {new Date(item.played_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                 </span>
+                <button
+                  onClick={() => toggleFavorite(item.title, item.webpage_url)}
+                  title={favUrls.has(item.webpage_url) ? "Remove from favorites" : "Add to favorites"}
+                  className={`p-1.5 rounded transition ${
+                    favUrls.has(item.webpage_url) ? "text-amber-400" : "text-muted hover:text-secondary"
+                  }`}
+                >
+                  <StarIcon filled={favUrls.has(item.webpage_url)} />
+                </button>
               </div>
             ))}
           </div>
@@ -546,6 +652,50 @@ export default function GuildPage() {
           )}
         </section>
       </div>
+
+      <section className="bg-card border border-border rounded-xl overflow-hidden mt-4">
+        <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
+          <h2 className="text-sm font-medium">Favorites</h2>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={favQuery}
+              onChange={(e) => setFavQuery(e.target.value)}
+              placeholder="Search favorites"
+              className="px-3 py-1.5 rounded-lg bg-surface border border-border text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent/60"
+            />
+            <span className="text-xs text-muted">{favorites?.length ?? 0}</span>
+          </div>
+        </div>
+        <div className="p-4 space-y-1 min-h-[5rem]">
+          {favFiltered.length === 0 && (
+            <p className="text-xs text-muted">
+              {favQuery.trim() ? "No favorite matches the search" : "Star a track in the queue or the history to keep it here"}
+            </p>
+          )}
+          {favFiltered.map((fav) => (
+            <div key={fav.id} className="flex items-center gap-2 bg-surface border border-border rounded-lg p-2">
+              <span className="text-amber-400 flex-none"><StarIcon filled /></span>
+              <p className="flex-1 text-sm text-primary truncate">{fav.title}</p>
+              {canQueue && (
+                <button onClick={() => playFavorite(fav, false)}
+                  className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition">Play now</button>
+              )}
+              {canQueue && (
+                <button onClick={() => playFavorite(fav)}
+                  className="px-2 py-1 rounded bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition">Queue</button>
+              )}
+              <button
+                onClick={() => toggleFavorite(fav.title, fav.webpage_url, fav.search_query)}
+                title="Remove from favorites"
+                className="p-1.5 rounded bg-card border border-border text-xs text-red-400 hover:text-red-300 transition"
+              >
+                <XIcon />
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
     </main>
   );
 }

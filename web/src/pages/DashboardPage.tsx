@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, clearToken } from "@/lib/api";
 import { useAccount, usePermissionWatch } from "@/lib/auth";
+import { useStreamEvents } from "@/lib/live";
 import { readCache, writeCache } from "@/lib/cache";
 import ThemeToggle from "@/components/ThemeToggle";
 import ErrorBox from "@/components/ErrorBox";
@@ -50,6 +51,26 @@ export default function DashboardPage() {
       alive = false;
     };
   }, [account]);
+
+  // Live playback push: the dots and the "playing now" counter refetch the
+  // statuses when the pipeline announces a change (start/pause/skip/stop) —
+  // no polling loops.
+  const refreshStatuses = useCallback(async () => {
+    const gs = await apiFetch<Guild[]>("/api/guilds").catch(() => null);
+    if (!gs) return;
+    const entries = await Promise.all(
+      gs.map(async (g) => {
+        const s = await apiFetch<Status>(`/api/guilds/${g.id}/status`).catch(() => null);
+        return [g.id, s] as const;
+      })
+    );
+    const map: Statuses = Object.fromEntries(entries);
+    setStatuses(map);
+    writeCache("pakodj:guild-statuses", map);
+  }, []);
+  useStreamEvents((name) => {
+    if (name === "playback") refreshStatuses();
+  });
 
   if (loading || !account) return error ? <ErrorBox message={error} /> : null;
   // Onboarding only when the account really sees nothing: no global view

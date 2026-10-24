@@ -1060,6 +1060,7 @@ async def stop(ctx):
         await database.clear_queue(ctx.guild.id)
         await database.clear_now_playing(ctx.guild.id)
         if ctx.voice_client and ctx.voice_client.is_connected():
+            server_info['intentional_leave'] = True  # stay out: !stop means it
             await ctx.voice_client.disconnect()
             await ctx.send("Track stopped and bot disconnected.")
         else:
@@ -1180,11 +1181,24 @@ async def _access_request_dm_buttons(interaction):
     else:
         await interaction.response.edit_message(content=f"{label}.", view=None)
 
+# Voice loyalty: remember the last voice channel per guild so an unexpected
+# drop (voice timeout, dead handshake, kick) can be recovered. A DELIBERATE
+# leave (panel Stop, !stop, stale-handle cleanup) sets server_info's
+# 'intentional_leave' flag first: then the bot stays out, no rejoin.
 # Keep runtime state consistent if the bot leaves voice unexpectedly
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if member.id == bot.user.id and member.guild and after.channel is None:
-        server_info = get_server_info(member.guild.id)
+    if member.id != bot.user.id or not member.guild:
+        return
+    server_info = get_server_info(member.guild.id)
+    if after.channel is not None:
+        # Joined (or moved): remember where it plays (and clear any leftover
+        # intentional-leave flag so future drops are treated as drops).
+        server_info['voice_channel_id'] = after.channel.id
+        server_info.pop('intentional_leave', None)
+        return
+    if server_info.pop('intentional_leave', False):
+        # Deliberate leave: stay out and clean up, no rejoin.
         task = server_info.get('loading_task')
         if task and not task.done():
             task.cancel()
@@ -1198,5 +1212,41 @@ async def on_voice_state_update(member, before, after):
         except ImportError:
             pass
         # The queue stays in the DB: '!skip' can resume it once back in voice
+        return
+    # UNEXPECTED leave: the connection died on its own. Clean up the mirror,
+    # then go back to the last channel after a short grace period and resume
+    # the persisted queue - the bot stays with the user, devotedly.
+    channel_id = server_info.get('voice_channel_id')
+    task = server_info.get('loading_task')
+    if task and not task.done():
+        task.cancel()
+    server_info['loading_task'] = None
+    server_info['current_track'] = None
+    server_info.pop('paused_at', None)
+    await database.clear_now_playing(member.guild.id)
+    try:
+        from api import notify_playback
+        notify_playback(member.guild.id)
+    except ImportError:
+        pass
+    channel = member.guild.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        return
+
+    async def rejoin():
+        try:
+            await channel.connect()
+            print(f"Voice auto-rejoined #{channel.name} in {member.guild.name}")
+            # The drop killed the audio mid-track: resume the persisted queue.
+            if not (member.guild.voice_client and member.guild.voice_client.is_playing()):
+                async with get_server_lock(member.guild.id):
+                    row = await database.claim_next_track(member.guild.id)
+                    if row is not None:
+                        await play_queued_row(member.guild.id, row, autopilot=False)
+        except Exception as e:
+            print(f"Voice auto-rejoin failed in {member.guild.name}: {e}")
+
+    await asyncio.sleep(3)
+    await rejoin()
 
 bot.run(os.getenv('token'))

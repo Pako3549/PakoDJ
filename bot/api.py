@@ -80,6 +80,12 @@ class GuildPermissionsRequest(_ViewBaselineMixin):
     permissions: list[Literal['view', 'queue', 'queue_manage', 'playback']] = Field(max_length=4)
 
 
+class FavoriteAddRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    webpage_url: str = Field(min_length=1, max_length=500)
+    search_query: Optional[str] = Field(default=None, max_length=300)
+
+
 class AccessRequestCreate(BaseModel):
     guild_id: Optional[int] = None
     message: str = Field('', max_length=200)
@@ -561,9 +567,11 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
 
     async def drop_stale_voice(guild):
         """Force-disconnect a voice client that claims to be connected while
-        the gateway disagrees; the next play/start joins fresh."""
+        the gateway disagrees; the next play/start joins fresh. The leave is
+        flagged intentional: the voice-loyalty rejoin must not fight it."""
         vc = guild.voice_client
         if vc is not None and vc.is_connected() and not really_in_voice(guild):
+            get_server_info(guild.id)['intentional_leave'] = True
             await vc.disconnect(force=True)
             return True
         return False
@@ -652,6 +660,30 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         get_guild(guild_id)
         removed = await database.clear_history(guild_id)
         return {"cleared": True, "removed": int(removed.split()[-1])}
+
+    # ------------------------------------------------------------------
+    # Personal favorites (any logged account; purely user-owned data)
+    # ------------------------------------------------------------------
+    @app.get("/api/favorites")
+    async def favorites_list(user: dict = Depends(_require_account)):
+        rows = await database.list_favorites(user['id'])
+        return [_row_dict(r) for r in rows]
+
+    @app.post("/api/favorites")
+    async def favorites_add(body: FavoriteAddRequest, user: dict = Depends(_require_account)):
+        favorite_id = await database.add_favorite(
+            user['id'], body.title.strip(), body.webpage_url,
+            (body.search_query or '').strip() or None
+        )
+        if favorite_id is None:
+            raise HTTPException(status_code=409, detail="Already in favorites")
+        return {"added": True, "favorite_id": favorite_id}
+
+    @app.delete("/api/favorites/{favorite_id}")
+    async def favorites_delete(favorite_id: int, user: dict = Depends(_require_account)):
+        if not await database.delete_favorite(user['id'], favorite_id):
+            raise HTTPException(status_code=404, detail="Unknown favorite")
+        return {"deleted": True}
 
     @app.get("/api/now-playing")
     async def now_playing(user: dict = Depends(_require_permission('view'))):
@@ -968,6 +1000,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         await database.clear_queue(guild_id)
         await database.clear_now_playing(guild_id)
         get_server_info(guild_id).pop('paused_at', None)
+        get_server_info(guild_id)['intentional_leave'] = True  # stay out: Stop means it
         await guild.voice_client.disconnect()
         notify_playback(guild_id)
         return {"stopped": True}

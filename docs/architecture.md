@@ -49,6 +49,7 @@ Discord (gateway/voice) │  bot/main.py (discord.py)                    │
 | `collections` | Playlist / album / loop groups being loaded in background | lets `!skip all` delete a whole group with one SQL statement |
 | `queue_items` | Play queue rows per guild | canonical metadata only (title, webpage_url, search_query, collection_id, position) |
 | `history` | Playback history per guild | capped by query, replaces unbounded in-memory lists |
+| `favorites` | Personal starred tracks per web account (starred from the queue or the history) | unique (user_id, webpage_url); canonical data only (title, webpage_url, search_query); cascades from the account |
 | `now_playing` | DB mirror of what every guild is playing | written by `play_audio`, cleaned by after-playing/stop/guild-remove/voice-leave AND wiped once at bot boot (a run that died mid-playback must not leave a dangling "playing" row); powers `GET /api/now-playing` |
 | `users` | Discord-linked API accounts | `permissions` = JSON set (view/queue/queue_manage/playback/manage_users), `seed` = env-owned flag, `guild_ids` = JSON snapshot of shared guilds (refreshed at login), `avatar_hash`, `password_hash` kept empty for future needs |
 | `api_sessions` | Server-side sessions | only the SHA-256 of the token is stored; TTL default 7 days (`API_SESSION_TTL_DAYS`) |
@@ -135,6 +136,11 @@ platform must serve a future web app with concurrent readers.
   Clicks on stale copies (already resolved from the panel or by another
   admin) re-mark that message with the actual outcome; a removed request
   greys it out.
+- **Voice loyalty:** the bot never leaves voice on its own. The last voice
+  channel is remembered per guild; an unexpected drop (voice timeout, dead
+  handshake, kick) triggers a delayed auto-rejoin plus a resume of the
+  persisted queue. Deliberate leaves (panel Stop, `!stop`, stale-handle
+  cleanup) set an `intentional_leave` flag first so the rejoin stays out.
 - **Open login, closed API:** any Discord account can complete the OAuth
   flow (the shared-server gate was dropped to make onboarding possible when
   the bot and the user share nothing yet). A new account starts with an

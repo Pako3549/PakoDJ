@@ -223,6 +223,9 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `DELETE` | `/api/guilds/{id}/queue` | `queue_manage` | Clear the queue |
 | `GET` | `/api/guilds/{id}/history?offset=0` | `view` | History of a server, page of 20: `{ "items": [...], "total": n }` |
 | `DELETE` | `/api/guilds/{id}/history` | `queue_manage` | Clear the whole playback history of a server |
+| `GET` | `/api/favorites` | account | The session account's starred tracks (newest first) |
+| `POST` | `/api/favorites` | account | `{ "title", "webpage_url", "search_query"? }` — star a track; duplicate URL answers 409 |
+| `DELETE` | `/api/favorites/{id}` | account | Remove one of the account's favorites (ownership enforced) |
 | `POST` | `/api/guilds/{id}/play` | `queue` | `{ "query": "..." }` — play or enqueue; when idle the bot joins the voice channel where the requester's Discord account is (409 if it is not in voice: it never picks a channel by guess) |
 | `POST` | `/api/guilds/{id}/skip` | `playback` | `{ "all": false }` — skip / skip all |
 | `POST` | `/api/guilds/{id}/pause` · `/resume` · `/stop` | `playback` | Playback controls |

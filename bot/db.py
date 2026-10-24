@@ -144,6 +144,20 @@ CREATE TABLE IF NOT EXISTS api_sessions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON api_sessions (expires_at);
+
+-- Personal favorites: starred from the queue or the history on the music
+-- page. One per (account, track): the webpage_url is the canonical identity
+-- and search_query keeps the just-in-time re-resolution cheap.
+CREATE TABLE IF NOT EXISTS favorites (
+    id           SERIAL PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title        TEXT NOT NULL,
+    webpage_url  TEXT NOT NULL,
+    search_query TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_favorites_user_url
+    ON favorites (user_id, webpage_url);
 """
 
 INSERT_TRACK = """
@@ -433,6 +447,45 @@ async def clear_history(guild_id):
     """Wipe one guild's playback history; returns the removed row count."""
     async with _pool_or_raise().acquire() as conn:
         return await conn.execute("DELETE FROM history WHERE guild_id = $1", guild_id)
+
+
+# ---------------------------------------------------------------------------
+# Favorites (per web account)
+# ---------------------------------------------------------------------------
+
+async def add_favorite(user_id, title, webpage_url, search_query=None):
+    """Star a track for one account; idempotent (the unique index makes a
+    duplicate a no-op). Returns the row id or None when it already existed."""
+    async with _pool_or_raise().acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO favorites (user_id, title, webpage_url, search_query) "
+            "VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (user_id, webpage_url) DO NOTHING "
+            "RETURNING id",
+            user_id, title, webpage_url, search_query
+        )
+        return row['id'] if row else None
+
+
+async def list_favorites(user_id):
+    """All favorites of one account, newest first."""
+    async with _pool_or_raise().acquire() as conn:
+        return await conn.fetch(
+            "SELECT id, title, webpage_url, search_query, created_at "
+            "FROM favorites WHERE user_id = $1 ORDER BY id DESC",
+            user_id
+        )
+
+
+async def delete_favorite(user_id, favorite_id):
+    """Remove one favorite owned by the account; returns True when a row was
+    actually deleted (the WHERE is the ownership check)."""
+    async with _pool_or_raise().acquire() as conn:
+        status = await conn.execute(
+            "DELETE FROM favorites WHERE user_id = $1 AND id = $2",
+            user_id, favorite_id
+        )
+        return status == 'DELETE 1'
 
 
 # ---------------------------------------------------------------------------
