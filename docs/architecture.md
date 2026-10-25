@@ -70,7 +70,7 @@ platform must serve a future web app with concurrent readers.
   (currently `https://dj.pako.uk`) — the domain lives in env, the path in code.
 - **Granular permissions:** accounts carry a JSON permission set — `view`
   (read endpoints), `queue` (find tracks, play/enqueue, search endpoint),
-  `queue_manage` (remove/reorder/clear/positioned-inserts), `playback` (pause/resume/skip/stop),
+  `queue_manage` (remove/reorder/clear/positioned-inserts/swap), `playback` (pause/resume/skip/stop),
   `manage_users` (accounts + access requests). Endpoints gate on exactly one
   key: `_require_account` → `_require_permission(key)`. The functional keys
   (queue, queue_manage, playback) implicitly require `view`: without it the

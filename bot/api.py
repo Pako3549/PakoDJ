@@ -80,6 +80,11 @@ class GuildPermissionsRequest(_ViewBaselineMixin):
     permissions: list[Literal['view', 'queue', 'queue_manage', 'playback']] = Field(max_length=4)
 
 
+class QueueSwapRequest(BaseModel):
+    a: int
+    b: int
+
+
 class FavoriteAddRequest(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     webpage_url: str = Field(min_length=1, max_length=500)
@@ -1032,7 +1037,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         if occupied:
             row_id = await database.enqueue_track(
                 guild_id=guild_id, title=title, webpage_url=video_url,
-                search_query=body.query
+                search_query=body.query, requester_id=admin['id']
             )
             return {"queued": True, "row_id": row_id, "title": title}
         # Not in voice (or a stale/lost handshake): the panel makes the bot
@@ -1067,7 +1072,7 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         if body.position is None:
             row_id = await database.enqueue_track(
                 guild_id=guild_id, title=title, webpage_url=video_url,
-                search_query=body.query
+                search_query=body.query, requester_id=admin['id']
             )
         else:
             queued = await database.count_queue(guild_id)
@@ -1075,17 +1080,36 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
                 raise HTTPException(status_code=400, detail="Position beyond the queue length")
             row_id = await database.insert_track_at_position(
                 guild_id, body.position, title=title, webpage_url=video_url,
-                search_query=body.query
+                search_query=body.query, requester_id=admin['id']
             )
         return {"queued": True, "row_id": row_id, "title": title}
 
     @app.patch("/api/guilds/{guild_id}/queue/{item_id}")
     async def move_queued(guild_id: int, item_id: int, body: QueueMoveRequest, admin: dict = Depends(_require_permission('queue_manage'))):
+        # Only queue_manage moves tracks freely: renumbering shifts everyone's
+        # position. Owners without it reshuffle through the swap endpoint.
         get_guild(guild_id)
         moved = await database.move_queue_item(guild_id, item_id, body.position)
         if moved is None:
             raise HTTPException(status_code=404, detail="Queued item not found")
         return dict(moved)
+
+    @app.post("/api/guilds/{guild_id}/queue/swap")
+    async def swap_queued(guild_id: int, body: QueueSwapRequest, user: dict = Depends(_require_account)):
+        # Swapping two rows never moves anyone else's track, so without
+        # queue_manage both rows must belong to the requester.
+        perms = await _effective_permissions(user, guild_id)
+        a_item = await database.get_queue_item(guild_id, body.a)
+        b_item = await database.get_queue_item(guild_id, body.b)
+        if a_item is None or b_item is None:
+            raise HTTPException(status_code=404, detail="Queued items not found")
+        # Swapping never moves anyone else's track: without queue_manage both
+        # rows must belong to the requester.
+        owns_both = a_item['requester_id'] == user['id'] and b_item['requester_id'] == user['id']
+        if 'queue_manage' not in perms and not owns_both:
+            raise HTTPException(status_code=403, detail="You can only swap tracks you added")
+        await database.swap_queue_positions(guild_id, body.a, body.b)
+        return {"swapped": True}
 
     @app.post("/api/guilds/{guild_id}/queue/reorder")
     async def reorder_queue(
@@ -1098,7 +1122,15 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         return {"reordered": count}
 
     @app.delete("/api/guilds/{guild_id}/queue/{item_id}")
-    async def remove_queued(guild_id: int, item_id: int, admin: dict = Depends(_require_permission('queue_manage'))):
+    async def remove_queued(guild_id: int, item_id: int, user: dict = Depends(_require_account)):
+        # Same ownership rule: manage anything, or just your own additions.
+        perms = await _effective_permissions(user, guild_id)
+        item = await database.get_queue_item(guild_id, item_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Queued item not found")
+        owns = item['requester_id'] == user['id']
+        if 'queue_manage' not in perms and not owns:
+            raise HTTPException(status_code=403, detail="You can only remove tracks you added")
         get_guild(guild_id)
         removed = await database.delete_queue_item(guild_id, item_id)
         if removed is None:

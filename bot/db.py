@@ -341,6 +341,30 @@ async def move_queue_item(guild_id, item_id, position):
             return moved
 
 
+async def swap_queue_positions(guild_id, id_a, id_b):
+    """Exchange the positions of two queued rows. Unlike move_queue_item it
+    never renumbers the rows in between: every other track keeps its exact
+    position. Returns False unless both rows exist in the guild."""
+    async with _pool_or_raise().acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch(
+                "SELECT id, position FROM queue_items "
+                "WHERE guild_id = $1 AND id = ANY($2::bigint[])",
+                guild_id, [id_a, id_b]
+            )
+            if len(rows) != 2:
+                return False
+            await conn.execute(
+                "UPDATE queue_items SET position = $2 WHERE id = $1",
+                rows[0]['id'], rows[1]['position']
+            )
+            await conn.execute(
+                "UPDATE queue_items SET position = $2 WHERE id = $1",
+                rows[1]['id'], rows[0]['position']
+            )
+            return True
+
+
 async def delete_queue_item(guild_id, item_id):
     """Remove one queued row and close the gap; returns the deleted row."""
     async with _pool_or_raise().acquire() as conn:

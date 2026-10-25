@@ -218,6 +218,7 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `GET` | `/api/search?q=` (`guild_id` optional) | `queue` effective in that guild | Track metadata (free Deezer public API, server-cached): pass `guild_id` to honour per-guild overrides |
 | `POST` | `/api/guilds/{id}/queue` | `queue` (`queue_manage` with `position`) | `{ "query": "...", "position": 0? }` — enqueue (append); a positioned insert (Play next) reshapes the shared queue and needs `queue_manage` |
 | `POST` | `/api/guilds/{id}/queue/reorder` | `queue_manage` | `{ "order": [item_id, ...] }` — batch rewrite of the queue order (drag & drop) |
+| `POST` | `/api/guilds/{id}/queue/swap` | `queue_manage` (or both tracks owned) | `{ "a": id, "b": id }` — exchange the positions of two queued tracks; nobody else's position moves |
 | `PATCH` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | `{ "position": n }` — move a single queued item |
 | `DELETE` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | Remove one queued item |
 | `DELETE` | `/api/guilds/{id}/queue` | `queue_manage` | Clear the queue |

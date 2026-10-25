@@ -13,6 +13,7 @@ type QueueItem = {
   webpage_url: string;
   position: number;
   search_query?: string | null;
+  requester_id?: string | null;
   pending?: boolean;
 };
 
@@ -357,6 +358,11 @@ export default function GuildPage() {
   const canPlayback = guildPerms.includes("playback");
   const canQueue = guildPerms.includes("queue");
   const canQueueManage = guildPerms.includes("queue_manage");
+  // Queue ownership: without queue_manage an account still controls the
+  // tracks it added itself (the API enforces the same rule).
+  const canManageItem = (item: QueueItem) =>
+    canQueueManage ||
+    (!item.pending && String(item.requester_id ?? "") === String(account?.id));
 
   const admin = async (path: string, init?: RequestInit) => {
     try {
@@ -370,17 +376,43 @@ export default function GuildPage() {
   // Optimistic batch reorder (drag & drop): reorder locally first, then let
   // the API confirm; on error reload from the source of truth.
   async function reorder(from: number, to: number) {
-    if (from === to || !canQueueManage) return;
-    const next = [...queue];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    setQueue(next);
+    if (from === to) return;
+    const moved = queue[from];
+    const target = queue[to];
     setDragIndex(null);
     setOverIndex(null);
+    if (canQueueManage) {
+      // queue_manage: full batch rewrite, any row onto any position.
+      const next = [...queue];
+      next.splice(from, 1);
+      next.splice(to, 0, moved);
+      setQueue(next);
+      try {
+        await apiFetch(`/api/guilds/${guildId}/queue/reorder`, {
+          method: "POST",
+          body: JSON.stringify({ order: next.map((i) => i.id) }),
+        });
+        await reloadData();
+      } catch (err) {
+        setError((err as Error).message);
+        await reloadData();
+      }
+      return;
+    }
+    // Without queue_manage the only permitted reshuffle is swapping two of
+    // the user's own tracks; the drag targets are pre-filtered above and the
+    // API still enforces the same rule (defence in depth).
+    setQueue((cur) =>
+      cur.map((i) =>
+        i.id === moved.id ? { ...i, position: target.position }
+          : i.id === target.id ? { ...i, position: moved.position }
+            : i
+      )
+    );
     try {
-      await apiFetch(`/api/guilds/${guildId}/queue/reorder`, {
+      await apiFetch(`/api/guilds/${guildId}/queue/swap`, {
         method: "POST",
-        body: JSON.stringify({ order: next.map((i) => i.id) }),
+        body: JSON.stringify({ a: moved.id, b: target.id }),
       });
       await reloadData();
     } catch (err) {
@@ -389,10 +421,6 @@ export default function GuildPage() {
     }
   }
 
-  // ---------- search + enqueue ----------
-  // Optimistic enqueue: the track shows up in the list right away with the
-  // raw query as placeholder; the server confirmation (which resolves the
-  // canonical data via yt-dlp) reconciles the truth through the SSE reload.
   function optimisticEnqueue(label: string, fire: () => Promise<void>, count = 1) {
     setAddOpen(false); // the add happened: back to the page to watch the queue
     setQuery("");
@@ -689,24 +717,28 @@ export default function GuildPage() {
             )}
             {qItems.map((item, index) => {
               const globalIndex = qStart + index;
+              // Where THIS row accepts a drop: manage users can drop anywhere,
+              // owners only onto their own rows (the browser then shows its
+              // not-allowed cursor over the others - no error toast needed).
+              const droppable = canQueueManage || canManageItem(item);
               return (
                 <div
                   key={`${item.id}-${item.position}`}
-                  draggable={canQueueManage && !item.pending}
+                  draggable={!item.pending && canManageItem(item)}
                   onDragStart={() => setDragIndex(globalIndex)}
                   onDragEnd={() => {
                     setDragIndex(null);
                     setOverIndex(null);
                   }}
                   onDragOver={(e) => {
-                    if (dragIndex !== null) e.preventDefault();
+                    if (dragIndex !== null && droppable && dragIndex !== globalIndex) e.preventDefault();
                   }}
                   onDragEnter={() => {
-                    if (dragIndex !== null && dragIndex !== globalIndex) setOverIndex(globalIndex);
+                    if (dragIndex !== null && droppable && dragIndex !== globalIndex) setOverIndex(globalIndex);
                   }}
                   onDrop={(e) => {
                     e.preventDefault();
-                    if (dragIndex !== null) reorder(dragIndex, globalIndex);
+                    if (dragIndex !== null && droppable && dragIndex !== globalIndex) reorder(dragIndex, globalIndex);
                     setDragIndex(null);
                     setOverIndex(null);
                   }}
@@ -718,8 +750,8 @@ export default function GuildPage() {
                         : "border-border"
                   }`}
                 >
-                  {canQueueManage ? (
-                    <span className="cursor-grab active:cursor-grabbing text-muted" title="Drag to reorder">
+                  {!item.pending && canManageItem(item) ? (
+                    <span className="cursor-grab active:cursor-grabbing text-muted" title="Drag to reorder or swap">
                       <GripIcon />
                     </span>
                   ) : (
@@ -741,9 +773,9 @@ export default function GuildPage() {
                       <StarIcon filled={favUrls.has(item.webpage_url)} />
                     </button>
                   )}
-                  {canQueueManage && !item.pending && (
+                  {!item.pending && canManageItem(item) && (
                     <button onClick={() => admin(`/api/guilds/${guildId}/queue/${item.id}`, { method: "DELETE" })}
-                      title="Remove from queue"
+                      title={canQueueManage ? "Remove from queue" : "Remove your track"}
                       className="p-1.5 rounded-md text-muted opacity-60 hover:opacity-100 hover:text-red-400 hover:bg-red-500/10 transition"><XIcon /></button>
                   )}
                 </div>
