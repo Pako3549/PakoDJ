@@ -215,14 +215,15 @@ Sessions are stored server side (only their SHA-256), can be revoked by deleting
 | `GET` | `/api/guilds/{id}/status` | `view` | Now playing (+ duration and elapsed position when known) + queue count + voice state |
 | `GET` | `/api/now-playing` | `view` | What every connected server is playing |
 | `GET` | `/api/guilds/{id}/queue` | `view` | Queue of a server |
-| `GET` | `/api/search?q=` | `queue` (implies `view`) | Track metadata (free Deezer public API, server-cached) |
-| `POST` | `/api/guilds/{id}/queue` | `queue` | `{ "query": "...", "position": 0? }` — enqueue (append or at a position) |
+| `GET` | `/api/search?q=` (`guild_id` optional) | `queue` effective in that guild | Track metadata (free Deezer public API, server-cached): pass `guild_id` to honour per-guild overrides |
+| `POST` | `/api/guilds/{id}/queue` | `queue` (`queue_manage` with `position`) | `{ "query": "...", "position": 0? }` — enqueue (append); a positioned insert (Play next) reshapes the shared queue and needs `queue_manage` |
 | `POST` | `/api/guilds/{id}/queue/reorder` | `queue_manage` | `{ "order": [item_id, ...] }` — batch rewrite of the queue order (drag & drop) |
 | `PATCH` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | `{ "position": n }` — move a single queued item |
 | `DELETE` | `/api/guilds/{id}/queue/{item_id}` | `queue_manage` | Remove one queued item |
 | `DELETE` | `/api/guilds/{id}/queue` | `queue_manage` | Clear the queue |
-| `GET` | `/api/guilds/{id}/history?offset=0` | `view` | History of a server, page of 20: `{ "items": [...], "total": n }` |
+| `GET` | `/api/guilds/{id}/history?offset=0&q=` | `view` | History of a server, page of 20, optional `q` title search: `{ "items": [...], "total": n }` |
 | `DELETE` | `/api/guilds/{id}/history` | `queue_manage` | Clear the whole playback history of a server |
+| `DELETE` | `/api/guilds/{id}/history/{entry_id}` | `queue_manage` | Remove a single history entry |
 | `GET` | `/api/favorites` | account | The session account's starred tracks (newest first) |
 | `POST` | `/api/favorites` | account | `{ "title", "webpage_url", "search_query"? }` — star a track; duplicate URL answers 409 |
 | `DELETE` | `/api/favorites/{id}` | account | Remove one of the account's favorites (ownership enforced) |

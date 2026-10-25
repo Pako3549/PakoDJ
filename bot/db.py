@@ -428,18 +428,22 @@ async def add_history(guild_id, title, webpage_url, requester_id=None):
         )
 
 
-async def list_history(guild_id, limit=50, offset=0):
+async def list_history(guild_id, limit=50, offset=0, q=None):
+    where = ("AND title ILIKE $4" if q else "")
+    args = [guild_id, limit, offset, f"%{q}%"] if q else [guild_id, limit, offset]
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetch(
-            "SELECT * FROM history WHERE guild_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3",
-            guild_id, limit, offset
+            f"SELECT * FROM history WHERE guild_id = $1 {where} ORDER BY id DESC LIMIT $2 OFFSET $3",
+            *args
         )
 
 
-async def count_history(guild_id):
+async def count_history(guild_id, q=None):
+    where = ("AND title ILIKE $2" if q else "")
+    args = [guild_id, f"%{q}%"] if q else [guild_id]
     async with _pool_or_raise().acquire() as conn:
         return await conn.fetchval(
-            "SELECT count(*) FROM history WHERE guild_id = $1", guild_id
+            f"SELECT count(*) FROM history WHERE guild_id = $1 {where}", *args
         )
 
 
@@ -447,6 +451,16 @@ async def clear_history(guild_id):
     """Wipe one guild's playback history; returns the removed row count."""
     async with _pool_or_raise().acquire() as conn:
         return await conn.execute("DELETE FROM history WHERE guild_id = $1", guild_id)
+
+
+async def delete_history_item(guild_id, history_id):
+    """Remove one history row of a guild; returns True when it existed."""
+    async with _pool_or_raise().acquire() as conn:
+        status = await conn.execute(
+            "DELETE FROM history WHERE guild_id = $1 AND id = $2",
+            guild_id, history_id
+        )
+        return status == 'DELETE 1'
 
 
 # ---------------------------------------------------------------------------
@@ -555,11 +569,13 @@ def normalize_permissions(raw):
 
 
 def parse_permissions(raw):
-    """Decode the stored JSON permission array into a validated list. The
+    """Decode a permission array into a validated list. Accepts the stored
+    JSON string OR an already-decoded list (route handlers pass user dicts
+    whose 'permissions' field was decoded by the auth dependency). The
     retired 'search' key aliases to 'queue' so stale legacy rows degrade
     gracefully instead of losing the merged permission."""
     try:
-        keys = json.loads(raw)
+        keys = json.loads(raw) if isinstance(raw, str) else raw
         if isinstance(keys, list):
             keys = ['queue' if k == 'search' else k for k in keys]
         return normalize_permissions(keys)

@@ -630,6 +630,12 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         return {
             "guild_id": str(guild_id),
             "guild_name": guild.name,
+            # Effective permissions in THIS guild (global set or per-guild
+            # override): the page renders its action buttons from these, so
+            # an account granted queue only via an override sees its tools.
+            "permissions": database.normalize_permissions(
+                await _effective_permissions(user, guild_id)
+            ),
             "voice_connected": in_voice,
             "playing": bool(in_voice and vc.is_playing()),
             "paused": bool(in_voice and vc.is_paused()),
@@ -649,17 +655,25 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         return [_row_dict(r) for r in rows]
 
     @app.get("/api/guilds/{guild_id}/history")
-    async def history(guild_id: int, offset: int = 0, user: dict = Depends(_require_permission('view'))):
+    async def history(guild_id: int, offset: int = 0, q: str = "", user: dict = Depends(_require_permission('view'))):
         get_guild(guild_id)
         offset = max(0, min(offset, 1000000))
-        rows = await database.list_history(guild_id, limit=20, offset=offset)
-        return {"items": [_row_dict(r) for r in rows], "total": await database.count_history(guild_id)}
+        q = q.strip()[:100] or None
+        rows = await database.list_history(guild_id, limit=20, offset=offset, q=q)
+        return {"items": [_row_dict(r) for r in rows], "total": await database.count_history(guild_id, q=q)}
 
     @app.delete("/api/guilds/{guild_id}/history")
     async def clear_guild_history(guild_id: int, admin: dict = Depends(_require_permission('queue_manage'))):
         get_guild(guild_id)
         removed = await database.clear_history(guild_id)
         return {"cleared": True, "removed": int(removed.split()[-1])}
+
+    @app.delete("/api/guilds/{guild_id}/history/{entry_id}")
+    async def delete_history_entry(guild_id: int, entry_id: int, admin: dict = Depends(_require_permission('queue_manage'))):
+        get_guild(guild_id)
+        if not await database.delete_history_item(guild_id, entry_id):
+            raise HTTPException(status_code=404, detail="Unknown history entry")
+        return {"deleted": True}
 
     # ------------------------------------------------------------------
     # Personal favorites (any logged account; purely user-owned data)
@@ -1043,6 +1057,10 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
     async def enqueue_at(guild_id: int, body: QueueEnqueueRequest, admin: dict = Depends(_require_permission('queue'))):
         guild = get_guild(guild_id)
         get_voice(guild)  # 409 if the bot is not connected
+        # A positioned insert (Play next) reshapes the queue everyone shares,
+        # so it gates on queue_manage; plain appends stay on queue.
+        if body.position is not None and 'queue_manage' not in admin['permissions']:
+            raise HTTPException(status_code=403, detail="Missing 'queue_manage' permission")
         stream_url, title, video_url, headers = await resolve_audio_info_async(body.query)
         if stream_url is None:
             raise HTTPException(status_code=400, detail="Unable to retrieve audio info")
@@ -1106,13 +1124,19 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         return session
 
     @app.get("/api/search")
-    async def search(q: str, user: dict = Depends(_require_permission('queue'))):
+    async def search(q: str, guild_id: int = None, user: dict = Depends(_require_account)):
         """Thin proxy for the free Deezer public metadata API (docs/meta layer:
         no playback permission): title/artist/cover/preview to power the webapp list;
-        picking a result just becomes a normal play/queue request."""
+        picking a result just becomes a normal play/queue request. The optional
+        guild_id scopes the queue-permission check to that guild's effective
+        set (global + override): accounts granted queue only inside a server
+        can search from its page."""
         q = q.strip()[:200]
         if not q:
             raise HTTPException(status_code=400, detail="Empty query")
+        perms = await _effective_permissions(user, guild_id)
+        if 'queue' not in perms:
+            raise HTTPException(status_code=403, detail="Missing 'queue' permission")
         cached = _search_cache.get(q)
         now_ts = time.time()
         for key, (exp, _) in list(_search_cache.items()):

@@ -19,6 +19,7 @@ type QueueItem = {
 type GuildStatus = {
   guild_id: string;
   guild_name: string;
+  permissions: string[];
   voice_connected: boolean;
   playing: boolean;
   paused: boolean;
@@ -116,6 +117,57 @@ function ArrowLeftIcon() {
   );
 }
 
+function PlayNextIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
+      <polygon points="4 5 13 12 4 19" />
+      <rect x="15" y="5" width="3" height="14" rx="1" />
+    </svg>
+  );
+}
+
+function QueueAddIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <line x1="4" y1="7" x2="14" y2="7" /><line x1="4" y1="12" x2="14" y2="12" />
+      <line x1="4" y1="17" x2="9" y2="17" /><line x1="17" y1="14" x2="17" y2="20" />
+      <line x1="14" y1="17" x2="20" y2="17" />
+    </svg>
+  );
+}
+
+function PauseCtlIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+      <rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" />
+    </svg>
+  );
+}
+
+function PlayCtlIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+      <polygon points="7 4 20 12 7 20" />
+    </svg>
+  );
+}
+
+function StopCtlIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+      <rect x="6" y="6" width="12" height="12" rx="1.5" />
+    </svg>
+  );
+}
+
+function SkipAllCtlIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+      <polygon points="3 5 11 12 3 19" /><polygon points="12 5 20 12 12 19" /><rect x="20" y="5" width="2.6" height="14" rx="1" />
+    </svg>
+  );
+}
+
 function StarIcon({ filled }: { filled: boolean }) {
   return (
     <svg viewBox="0 0 24 24" width="15" height="15"
@@ -132,11 +184,6 @@ export default function GuildPage() {
   const navigate = useNavigate();
   const { account, loading, error: authError } = useAccount();
   usePermissionWatch(account);
-  // Granular gating: each control group maps to its own permission key,
-  // resolved against the global set (the API applies per-guild overrides).
-  const canPlayback = account?.permissions.includes("playback") ?? false;
-  const canQueue = account?.permissions.includes("queue") ?? false;
-  const canQueueManage = account?.permissions.includes("queue_manage") ?? false;
   // The header has a back arrow: Escape goes back to the dashboard
   // (suppressed while the add-music dialog owns the Escape key).
   const [addOpen, setAddOpen] = useState(false);
@@ -160,6 +207,8 @@ export default function GuildPage() {
   const [previewing, setPreviewing] = useState<string | null>(null);
   const [history, setHistory] = useState<{ items: HistoryItem[]; total: number } | null>(null);
   const [historyPage, setHistoryPage] = useState(0);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [queueQuery, setQueueQuery] = useState("");
   const [favorites, setFavorites] = useState<Favorite[] | null>(null);
   const [favQuery, setFavQuery] = useState("");
   const [favPage, setFavPage] = useState(0);
@@ -170,11 +219,11 @@ export default function GuildPage() {
   const [posSync, setPosSync] = useState<{ position: number | null; at: number }>({ position: null, at: 0 });
   const [nowTs, setNowTs] = useState(Date.now());
 
-  const fetchHistory = useCallback(async (page: number) => {
+  const fetchHistory = useCallback(async (page: number, query = "") => {
     if (!guildId) return;
     try {
       const data = await apiFetch<{ items: HistoryItem[]; total: number }>(
-        `/api/guilds/${guildId}/history?offset=${page * HISTORY_PAGE_SIZE}`
+        `/api/guilds/${guildId}/history?offset=${page * HISTORY_PAGE_SIZE}&q=${encodeURIComponent(query)}`
       );
       setHistory(data);
       setHistoryPage(page);
@@ -249,16 +298,15 @@ export default function GuildPage() {
         .catch(() => {});
     }
     reloadData();
-    fetchHistory(0);
     fetchFavorites();
-  }, [account, guildId, reloadData, fetchHistory, fetchFavorites]);
+  }, [account, guildId, reloadData, fetchFavorites]);
 
   // Live playback push: the bot signals every state change (track start,
   // stop, pause, skip) on the shared SSE stream — no polling loops.
   useStreamEvents((name) => {
     if (name === "playback") {
       reloadData();
-      fetchHistory(historyPage);
+      fetchHistory(historyPage, historyQuery);
     }
   });
 
@@ -280,6 +328,12 @@ export default function GuildPage() {
     return () => clearInterval(id);
   }, []);
 
+  // History search: debounced so typing does not hammer the API.
+  useEffect(() => {
+    const id = setTimeout(() => fetchHistory(0, historyQuery), 300);
+    return () => clearTimeout(id);
+  }, [historyQuery, fetchHistory]);
+
   // Tab title tracks the guild name; reset to the app title on unmount.
   useEffect(() => {
     if (guildName) document.title = `${guildName} · PakoDJ`;
@@ -293,6 +347,16 @@ export default function GuildPage() {
   }, [query]);
 
   if (loading || !account || !guildId) return authError ? <ErrorBox message={authError} /> : null;
+
+  // Granular gating: each control group maps to its own permission key,
+  // resolved against the EFFECTIVE set of this guild (the status endpoint
+  // merges the global set with any per-guild override), so an account with
+  // grants only inside this server sees its tools here. Until the first
+  // status fetch lands, the global set is the honest fallback.
+  const guildPerms = status?.permissions ?? account?.permissions ?? [];
+  const canPlayback = guildPerms.includes("playback");
+  const canQueue = guildPerms.includes("queue");
+  const canQueueManage = guildPerms.includes("queue_manage");
 
   const admin = async (path: string, init?: RequestInit) => {
     try {
@@ -330,6 +394,7 @@ export default function GuildPage() {
   // raw query as placeholder; the server confirmation (which resolves the
   // canonical data via yt-dlp) reconciles the truth through the SSE reload.
   function optimisticEnqueue(label: string, fire: () => Promise<void>, count = 1) {
+    setAddOpen(false); // the add happened: back to the page to watch the queue
     setQuery("");
     setHits([]);
     setPreviewing(null);
@@ -373,7 +438,7 @@ export default function GuildPage() {
     }
     setSearching(true);
     try {
-      const list = await apiFetch<SearchHit[]>(`/api/search?q=${encodeURIComponent(text)}`);
+      const list = await apiFetch<SearchHit[]>(`/api/search?q=${encodeURIComponent(text)}&guild_id=${guildId}`);
       setHits(list);
     } catch (err) {
       // no permission or metadata provider down: treat the raw text as a
@@ -414,13 +479,32 @@ export default function GuildPage() {
   const pct = duration ? Math.min(100, Math.max(0, (elapsed / duration) * 100)) : 0;
 
   // ---------- queue pagination ----------
-  const qPages = Math.max(1, Math.ceil(queue.length / QUEUE_PAGE_SIZE));
+  const qNeedle = queueQuery.trim().toLowerCase();
+  const queueFiltered = qNeedle
+    ? queue.filter((i) => i.title.toLowerCase().includes(qNeedle))
+    : queue;
+  const qPages = Math.max(1, Math.ceil(queueFiltered.length / QUEUE_PAGE_SIZE));
   const qSafe = Math.min(queuePage, qPages - 1);
   const qStart = qSafe * QUEUE_PAGE_SIZE;
-  const qItems = queue.slice(qStart, qStart + QUEUE_PAGE_SIZE);
+  const qItems = queueFiltered.slice(qStart, qStart + QUEUE_PAGE_SIZE);
   const hPages = Math.max(1, Math.ceil((history?.total ?? 0) / HISTORY_PAGE_SIZE));
   const hSafe = Math.min(historyPage, hPages - 1);
   const active = Boolean(status?.playing || status?.paused);
+
+  // ---------- history actions ----------
+  const playHistory = (item: HistoryItem, where: "next" | "end") =>
+    admin(`/api/guilds/${guildId}/queue`, {
+      method: "POST",
+      body: JSON.stringify(
+        where === "next"
+          ? { query: item.webpage_url, position: 0 }
+          : { query: item.webpage_url }
+      ),
+    });
+  const deleteHistoryItem = async (id: number) => {
+    await admin(`/api/guilds/${guildId}/history/${id}`, { method: "DELETE" });
+    await fetchHistory(hSafe);
+  };
 
   // ---------- favorites ----------
   const favUrls = new Set((favorites ?? []).map((f) => f.webpage_url));
@@ -430,10 +514,17 @@ export default function GuildPage() {
   const favPages = Math.max(1, Math.ceil(favFiltered.length / FAV_PAGE_SIZE));
   const fSafe = Math.min(favPage, favPages - 1);
   const favPageItems = favFiltered.slice(fSafe * FAV_PAGE_SIZE, (fSafe + 1) * FAV_PAGE_SIZE);
+  // Positioned insert (top of the queue): reshapes the shared order.
   const playFavorite = (fav: Favorite) =>
     admin(`/api/guilds/${guildId}/queue`, {
       method: "POST",
       body: JSON.stringify({ query: fav.search_query || fav.webpage_url, position: 0 }),
+    });
+  // Plain append: nothing special, plain queue permission.
+  const queueFavorite = (fav: Favorite) =>
+    admin(`/api/guilds/${guildId}/queue`, {
+      method: "POST",
+      body: JSON.stringify({ query: fav.search_query || fav.webpage_url }),
     });
 
   const controlCls = "px-4 py-2 rounded-lg text-xs font-medium transition disabled:opacity-40";
@@ -524,32 +615,42 @@ export default function GuildPage() {
           </div>
         )}
 
-        <div className="flex items-center justify-center gap-2 mt-5 flex-wrap">
+        <div className="flex items-center justify-center gap-3 mt-5 flex-wrap">
           {canPlayback && (
             status?.playing ? (
-              <button onClick={() => admin(`/api/guilds/${guildId}/pause`, { method: "POST" })}
-                className={`${controlCls} bg-accent text-inverse hover:bg-accent/90`}>Pause</button>
+              <button onClick={() => admin(`/api/guilds/${guildId}/pause`, { method: "POST" })} title="Pause"
+                className="p-3 rounded-full bg-accent text-inverse hover:bg-accent/90 transition disabled:opacity-40" disabled={!status?.playing}>
+                <PauseCtlIcon />
+              </button>
             ) : (
               <button onClick={() => admin(status?.paused ? `/api/guilds/${guildId}/resume` : `/api/guilds/${guildId}/queue/start`, { method: "POST" })}
                 disabled={!status?.paused && !(status?.queue_count ?? 0)}
-                title={!status?.paused && !(status?.queue_count ?? 0) ? "Nothing to play" : undefined}
-                className={`${controlCls} bg-accent text-inverse hover:bg-accent/90`}>Play</button>
+                title={!status?.paused && !(status?.queue_count ?? 0) ? "Nothing to play" : "Play"}
+                className="p-3 rounded-full bg-accent text-inverse hover:bg-accent/90 transition disabled:opacity-40">
+                <PlayCtlIcon />
+              </button>
             )
           )}
           {canPlayback && (
             <button onClick={() => admin(`/api/guilds/${guildId}/skip`, { method: "POST", body: JSON.stringify({ all: false }) })}
-              disabled={!active}
-              className={`${controlCls} bg-card border border-border text-secondary hover:text-primary`}>Skip</button>
+              disabled={!active} title="Skip"
+              className="p-2.5 rounded-full text-secondary hover:text-primary hover:bg-surface transition disabled:opacity-40">
+              <PlayNextIcon />
+            </button>
           )}
           {canPlayback && (
             <button onClick={() => admin(`/api/guilds/${guildId}/skip`, { method: "POST", body: JSON.stringify({ all: true }) })}
-              disabled={!active}
-              className={`${controlCls} bg-card border border-border text-secondary hover:text-primary`}>Skip all</button>
+              disabled={!active} title="Skip all"
+              className="p-2.5 rounded-full text-secondary hover:text-primary hover:bg-surface transition disabled:opacity-40">
+              <SkipAllCtlIcon />
+            </button>
           )}
           {canPlayback && (
             <button onClick={() => admin(`/api/guilds/${guildId}/stop`, { method: "POST" })}
-              disabled={!status?.voice_connected}
-              className={`${controlCls} bg-red-500/10 text-red-400 hover:bg-red-500/20`}>Stop</button>
+              disabled={!status?.voice_connected} title="Stop"
+              className="p-2.5 rounded-full text-red-400 hover:bg-red-500/10 transition disabled:opacity-40">
+              <StopCtlIcon />
+            </button>
           )}
         </div>
 
@@ -565,7 +666,16 @@ export default function GuildPage() {
           <div className="px-4 py-3 border-b border-border flex items-center justify-between">
             <h2 className="text-sm font-medium">Queue</h2>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-muted">{queue.length}</span>
+              <input
+                type="text"
+                value={queueQuery}
+                onChange={(e) => setQueueQuery(e.target.value)}
+                placeholder="Search queue"
+                className="px-3 py-1.5 rounded-lg bg-surface border border-border text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent/60"
+              />
+              <span className="text-xs text-muted">
+                {queueQuery.trim() ? `${queueFiltered.length} of ${queue.length}` : queue.length}
+              </span>
               {canQueueManage && queue.length > 0 && (
                 <button onClick={() => admin(`/api/guilds/${guildId}/queue`, { method: "DELETE" })}
                   className="px-2 py-1 rounded bg-red-500/10 text-red-400 text-xs hover:bg-red-500/20 transition">Clear</button>
@@ -574,6 +684,9 @@ export default function GuildPage() {
           </div>
           <div className="p-4 space-y-1 h-96 overflow-y-auto">
             {queue.length === 0 && <p className="text-xs text-muted">Queue is empty</p>}
+            {queue.length > 0 && queueFiltered.length === 0 && (
+              <p className="text-xs text-muted">No queue entries match the search</p>
+            )}
             {qItems.map((item, index) => {
               const globalIndex = qStart + index;
               return (
@@ -652,6 +765,13 @@ export default function GuildPage() {
           <div className="px-4 py-3 border-b border-border flex items-center justify-between">
             <h2 className="text-sm font-medium">History</h2>
             <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={historyQuery}
+                onChange={(e) => setHistoryQuery(e.target.value)}
+                placeholder="Search history"
+                className="px-3 py-1.5 rounded-lg bg-surface border border-border text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent/60"
+              />
               <span className="text-xs text-muted">{history?.total ?? 0}</span>
               {canQueueManage && (history?.total ?? 0) > 0 && (
                 <button onClick={async () => { await admin(`/api/guilds/${guildId}/history`, { method: "DELETE" }); await fetchHistory(0); }}
@@ -660,13 +780,25 @@ export default function GuildPage() {
             </div>
           </div>
           <div className="p-4 space-y-1 h-96 overflow-y-auto">
-            {(history?.items.length ?? 0) === 0 && <p className="text-xs text-muted">Nothing played yet</p>}
+            {(history?.items.length ?? 0) === 0 && (
+              <p className="text-xs text-muted">
+                {historyQuery.trim() ? "No history matches the search" : "Nothing played yet"}
+              </p>
+            )}
             {history?.items.map((item) => (
               <div key={item.id} className="flex items-center gap-2 bg-surface border border-border rounded-lg p-2">
                 <p className="flex-1 text-sm text-primary truncate">{item.title}</p>
                 <span className="text-xs text-muted whitespace-nowrap">
                   {new Date(item.played_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
                 </span>
+                {canQueueManage && (
+                  <button onClick={() => playHistory(item, "next")} title="Play right after the current track"
+                    className="p-1.5 rounded-md text-muted opacity-60 hover:opacity-100 hover:text-secondary transition"><PlayNextIcon /></button>
+                )}
+                {canQueue && (
+                  <button onClick={() => playHistory(item, "end")} title="Add to the queue"
+                    className="p-1.5 rounded-md text-muted opacity-60 hover:opacity-100 hover:text-secondary transition"><QueueAddIcon /></button>
+                )}
                 <button
                   onClick={() => toggleFavorite(item.title, item.webpage_url)}
                   title={favUrls.has(item.webpage_url) ? "Remove from favorites" : "Add to favorites"}
@@ -676,6 +808,10 @@ export default function GuildPage() {
                 >
                   <StarIcon filled={favUrls.has(item.webpage_url)} />
                 </button>
+                {canQueueManage && (
+                  <button onClick={() => deleteHistoryItem(item.id)} title="Remove from history"
+                    className="p-1.5 rounded-md text-muted opacity-60 hover:opacity-100 hover:text-red-400 hover:bg-red-500/10 transition"><XIcon /></button>
+                )}
               </div>
             ))}
           </div>
@@ -722,13 +858,13 @@ export default function GuildPage() {
                   <StarIcon filled />
                 </button>
                 <p className="flex-1 text-sm text-primary truncate">{fav.title}</p>
-                {canQueue && (
-                  <button onClick={() => playFavorite(fav)} title="Play right after the current track"
-                    className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition whitespace-nowrap">Play next</button>
+                {canQueueManage && (
+                  <button onClick={() => playFavorite(fav)} title="Play right after the current track (queue_manage)"
+                    className="p-1.5 rounded-md text-muted opacity-60 hover:opacity-100 hover:text-secondary transition"><PlayNextIcon /></button>
                 )}
                 {canQueue && (
-                  <button onClick={() => { playFavorite(fav); }}
-                    className="px-2 py-1 rounded bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition">Queue</button>
+                  <button onClick={() => queueFavorite(fav)} title="Add to the queue"
+                    className="p-1.5 rounded-md text-muted opacity-60 hover:opacity-100 hover:text-secondary transition"><QueueAddIcon /></button>
                 )}
               </div>
             ))}
@@ -827,13 +963,13 @@ export default function GuildPage() {
                       className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition whitespace-nowrap">
                       {previewing === hit.preview ? "Stop" : "Preview"}
                     </button>
-                    {canQueue && (
-                      <button onClick={() => enqueueHit(hit, "next")}
-                        className="px-2 py-1 rounded bg-card border border-border text-xs text-secondary hover:text-primary transition whitespace-nowrap">Play next</button>
+                    {canQueueManage && (
+                      <button onClick={() => enqueueHit(hit, "next")} title="Play right after the current track"
+                        className="p-1.5 rounded-md text-muted opacity-60 hover:opacity-100 hover:text-secondary transition"><PlayNextIcon /></button>
                     )}
-                    {canQueue && (
-                      <button onClick={() => enqueueHit(hit, "end")}
-                        className="px-2 py-1 rounded bg-accent text-inverse text-xs font-medium hover:bg-accent/90 transition whitespace-nowrap">Queue</button>
+                                        {canQueue && (
+                      <button onClick={() => enqueueHit(hit, "end")} title="Add to the queue"
+                        className="p-1.5 rounded-md text-muted opacity-60 hover:opacity-100 hover:text-secondary transition"><QueueAddIcon /></button>
                     )}
                   </div>
                 );

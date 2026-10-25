@@ -474,8 +474,10 @@ export default function UsersPage() {
       <header className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <button onClick={() => navigate(goBack(location.pathname))} title="Back"
-            className="px-3 py-2 rounded-lg bg-card border border-border text-sm text-secondary hover:text-primary transition">
-            ←
+            className="p-2.5 rounded-lg bg-card border border-border text-secondary hover:text-primary transition">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16" aria-hidden="true">
+              <line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" />
+            </svg>
           </button>
           <div>
             <h1 className="text-lg font-semibold">Users</h1>
