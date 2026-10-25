@@ -108,9 +108,13 @@ platform must serve a future web app with concurrent readers.
   so membership changes reach the panel without a re-login; failures fall
   back to the stored snapshot. Both the admin user detail response and the
   permission endpoints never return these token columns.
-- **Live grant push (SSE):** the request-access panel holds ONE
-  `GET /api/stream/updates` connection (Bearer-authenticated fetch reader,
-  15s keepalive comments, per-account capped queues, no polling).
+- **Live grant push (SSE):** every page hooks tap a SINGLE multiplexed
+  reader (`openStream` in `web/src/lib/live.ts`): one
+  `GET /api/stream/updates` connection per browser tab, N subscribers, torn
+  down when the last subscriber leaves; the raw reader reconnects forever
+  (2s backoff after each drop, 5s retry while logged out). The
+  connection is Bearer-authenticated with
+  15s keepalive comments, per-account capped queues, no polling.
   `/api/stream/updates` fires `event: granted` the moment `PATCH
   /api/access-requests/{id}` (or a direct `PATCH /api/users/{id}` /
   `PUT /api/users/{id}/guilds/{gid}`) resolves for that account; the panel
@@ -121,9 +125,12 @@ platform must serve a future web app with concurrent readers.
   manage_users streams only, flagged at connect), refreshing the queue in
   place. The music page listens for `event: playback` (guild id payload,
   broadcast to every open stream by the pipeline via `notify_playback`:
-  track start, pause, resume, skip, stop, queue drain) and refetches status,
-  queue and history on it — progress interpolates locally second by second
-  between pushes. `X-Accel-Buffering: no` keeps nginx from buffering the
+  track start, pause, resume, skip, stop, queue drain) and refetches
+  status, queue and history on it — pushes arrive one per queue mutation,
+  so bursts (e.g. adding ten copies at once) coalesce into a single
+  trailing reload 250ms after the last push. The progress bar interpolates
+  inside a memoized leaf (`ProgressLine`) that owns its own 1s clock, so
+  the page itself no longer re-renders every second just to move the bar. `X-Accel-Buffering: no` keeps nginx from buffering the
   stream; no extra nginx configuration exists for it.
   Each created request DMs every env admin (best effort, 10 s timeout,
   silent failure) so the panel does not need watching; resolving a request

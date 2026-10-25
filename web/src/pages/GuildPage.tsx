@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { apiFetch, clearToken } from "@/lib/api";
 import { useAccount, usePermissionWatch } from "@/lib/auth";
@@ -179,6 +179,49 @@ function StarIcon({ filled }: { filled: boolean }) {
   );
 }
 
+// Progress line with its OWN 1s clock: when the ticker lived in the page
+// component, every second repainted all three lists just to move the bar.
+// This memoized leaf re-renders alone and sits idle while paused.
+const ProgressLine = memo(function ProgressLine({
+  playing,
+  paused,
+  base,
+  at,
+  duration,
+}: {
+  playing: boolean;
+  paused: boolean;
+  base: number | null;
+  at: number;
+  duration: number | null;
+}) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    setNow(Date.now()); // a fresh baseline landed: re-anchor the clock
+    if (!playing) return; // the clock only runs while the track advances
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [playing, at]);
+  const elapsed = playing
+    ? (base ?? 0) + Math.max(0, (now - at) / 1000)
+    : paused
+      ? (base ?? 0)
+      : 0;
+  const pct = duration ? Math.min(100, Math.max(0, (elapsed / duration) * 100)) : 0;
+  if (duration === null || duration === undefined) {
+    return <p className="text-center text-xs text-muted tabular-nums">{fmt(elapsed)}</p>;
+  }
+  return (
+    <div className="flex items-center gap-3">
+      <span className="text-xs text-muted w-12 text-right tabular-nums">{fmt(elapsed)}</span>
+      <div className="flex-1 h-1.5 rounded-full bg-border overflow-hidden">
+        <div className="h-full bg-accent rounded-full transition-[width] duration-1000 ease-linear" style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-xs text-muted w-12 tabular-nums">{fmt(duration)}</span>
+    </div>
+  );
+});
+
 export default function GuildPage() {
   const { guildId } = useParams<{ guildId: string }>();
   const location = useLocation();
@@ -216,9 +259,9 @@ export default function GuildPage() {
   const [searching, setSearching] = useState(false);
   const [playCount, setPlayCount] = useState(1);
   // Progress baseline: the position reported by the last status fetch plus
-  // when it was fetched; the 1s ticker interpolates between fetches.
+  // when it was fetched; the progress leaf interpolates between fetches on
+  // its own local clock (the page itself does not tick).
   const [posSync, setPosSync] = useState<{ position: number | null; at: number }>({ position: null, at: 0 });
-  const [nowTs, setNowTs] = useState(Date.now());
 
   const fetchHistory = useCallback(async (page: number, query = "") => {
     if (!guildId) return;
@@ -303,12 +346,21 @@ export default function GuildPage() {
   }, [account, guildId, reloadData, fetchFavorites]);
 
   // Live playback push: the bot signals every state change (track start,
-  // stop, pause, skip) on the shared SSE stream — no polling loops.
+  // stop, pause, skip) on the shared SSE stream — no polling loops. Each
+  // queue mutation fires one event, so bursts (adding 10 copies = 10 events)
+  // coalesce into ONE trailing reload instead of a fetch storm.
+  const burstTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (burstTimer.current) clearTimeout(burstTimer.current);
+  }, []);
   useStreamEvents((name) => {
-    if (name === "playback") {
-      reloadData();
+    if (name !== "playback") return;
+    if (burstTimer.current) clearTimeout(burstTimer.current);
+    burstTimer.current = setTimeout(async () => {
+      burstTimer.current = null;
+      await reloadData();
       fetchHistory(historyPage, historyQuery);
-    }
+    }, 250);
   });
 
   // Add-music modal: focus the search box on open, Escape closes the
@@ -323,11 +375,8 @@ export default function GuildPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [addOpen]);
 
-  // 1s interpolation tick for the progress line (local only, no network).
-  useEffect(() => {
-    const id = setInterval(() => setNowTs(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
+  // 1s interpolation now lives inside the memoized ProgressLine leaf: the
+  // page does not re-render on a clock anymore.
 
   // History search: debounced so typing does not hammer the API.
   useEffect(() => {
@@ -496,15 +545,8 @@ export default function GuildPage() {
     }, count);
   }
 
-  // ---------- progress interpolation ----------
+  // ---------- now playing (drives the title and the self-ticking progress leaf) ----------
   const np = status?.now_playing ?? null;
-  const elapsed = status?.playing
-    ? (posSync.position ?? 0) + Math.max(0, (nowTs - posSync.at) / 1000)
-    : status?.paused
-      ? (posSync.position ?? 0)
-      : 0;
-  const duration = np?.duration ?? null;
-  const pct = duration ? Math.min(100, Math.max(0, (elapsed / duration) * 100)) : 0;
 
   // ---------- queue pagination ----------
   const qNeedle = queueQuery.trim().toLowerCase();
@@ -629,17 +671,13 @@ export default function GuildPage() {
 
         {np && (
           <div className="mt-4">
-            {duration !== null && duration !== undefined ? (
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-muted w-12 text-right tabular-nums">{fmt(elapsed)}</span>
-                <div className="flex-1 h-1.5 rounded-full bg-border overflow-hidden">
-                  <div className="h-full bg-accent rounded-full transition-[width] duration-1000 ease-linear" style={{ width: `${pct}%` }} />
-                </div>
-                <span className="text-xs text-muted w-12 tabular-nums">{fmt(duration)}</span>
-              </div>
-            ) : (
-              <p className="text-center text-xs text-muted tabular-nums">{fmt(elapsed)}</p>
-            )}
+            <ProgressLine
+              playing={Boolean(status?.playing)}
+              paused={Boolean(status?.paused)}
+              base={posSync.position}
+              at={posSync.at}
+              duration={np.duration ?? null}
+            />
           </div>
         )}
 

@@ -1,12 +1,12 @@
 import { useEffect, useRef } from "react";
 import { getToken } from "@/lib/api";
 
-// Shared SSE reader over the update stream: connects with the session token,
-// fires onEvent with every pushed event name (except the connect handshake)
-// and RECONNECTS with a short backoff forever — a bot restart or a dropped
-// connection must never leave a page deaf until a manual reload. Returns the
-// cleanup function.
-export function openStream(onEvent: (event: string) => void): () => void {
+// Raw reader: one streaming connection with the session token that fires
+// onEvent for every pushed event (except the connect handshake) and
+// RECONNECTS with a short backoff forever — a bot restart or a dropped
+// connection must never leave a page deaf until a manual reload. Pages never
+// call this directly: they subscribe to the shared singleton below.
+function rawOpenStream(onEvent: (event: string) => void): () => void {
   let ctrl: AbortController | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
@@ -14,7 +14,11 @@ export function openStream(onEvent: (event: string) => void): () => void {
   const connect = () => {
     if (stopped) return;
     const token = getToken();
-    if (!token) return; // logged out: nothing to listen to
+    if (!token) {
+      // Logged out: retry slowly, a later login must still get live events.
+      timer = setTimeout(connect, 5000);
+      return;
+    }
     ctrl = new AbortController();
     fetch("/api/stream/updates", {
       headers: { Authorization: `Bearer ${token}` },
@@ -50,6 +54,37 @@ export function openStream(onEvent: (event: string) => void): () => void {
     stopped = true;
     if (timer) clearTimeout(timer);
     ctrl?.abort();
+  };
+}
+
+// Shared singleton: ONE connection per tab, N subscribers. Every hook used
+// to open its own stream (the guild page totaled three with the account
+// watcher) — a single multiplexed reader cuts the overhead of all those
+// parallel decoders and reconnect timers.
+type Listener = (event: string) => void;
+const listeners = new Set<Listener>();
+let closeRaw: (() => void) | null = null;
+
+function broadcast(name: string) {
+  for (const listen of [...listeners]) {
+    try {
+      listen(name);
+    } catch {
+      // one misbehaving subscriber must not starve the others
+    }
+  }
+}
+
+export function openStream(onEvent: Listener): () => void {
+  if (!closeRaw) closeRaw = rawOpenStream(broadcast);
+  listeners.add(onEvent);
+  return () => {
+    listeners.delete(onEvent);
+    // Last subscriber out: tear the connection down until someone needs it.
+    if (listeners.size === 0) {
+      closeRaw?.();
+      closeRaw = null;
+    }
   };
 }
 
