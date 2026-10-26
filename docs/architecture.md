@@ -130,7 +130,27 @@ platform must serve a future web app with concurrent readers.
   so bursts (e.g. adding ten copies at once) coalesce into a single
   trailing reload 250ms after the last push. The progress bar interpolates
   inside a memoized leaf (`ProgressLine`) that owns its own 1s clock, so
-  the page itself no longer re-renders every second just to move the bar. `X-Accel-Buffering: no` keeps nginx from buffering the
+  the page itself no longer re-renders every second just to move the bar.
+- **Zombie voice clients:** a dead handshake (or an aborted connect) leaves
+  a cached VoiceClient behind; discord.py refuses every later `connect()`
+  with "Already connected to a voice channel." while any object exists for
+  the guild. Both layers clean it before joining: the chat side purges via
+  `purge_voice_handle` (strict check `bot_voice_state_ok`: connected AND
+  gateway voice state present, mirroring the API-side `really_in_voice`)
+  in `play_audio` and `!join`; the API paths call `drop_stale_voice`,
+  which now also drops fully-dead handles. The purge returns the channel
+  the gateway still shows the bot in: play paths rejoin there (or in the
+  requester's channel when visible), so a repair never abandons the room —
+  the Scheduled queue advance only wipes the queue when the bot is gone
+  under both views. A semi-alive drop sets `intentional_leave` so the
+  voice-loyalty rejoin does not fight it.
+- **Panel queue auto-start:** `POST /api/guilds/{id}/queue` while nothing
+  is playing claims the fresh head and rolls it through the normal
+  pipeline (`claim_next_track` → `play_queued_row`, autopilot off),
+  joining the requester's voice channel first (same rules and 409 wording
+  as `/play`); the channel check happens before the insert so a rejection
+  never swallows a queued row. A running playlist loader keeps ownership
+  of the rollout. `X-Accel-Buffering: no` keeps nginx from buffering the
   stream; no extra nginx configuration exists for it.
   Each created request DMs every env admin (best effort, 10 s timeout,
   silent failure) so the panel does not need watching; resolving a request

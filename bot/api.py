@@ -559,27 +559,42 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
     def get_voice(guild):
         return guild.voice_client
 
+    def gateway_voice_channel(guild):
+        """The channel the gateway still shows the bot in (what users see in
+        the channel list), even when the VoiceClient handle cannot carry
+        audio anymore."""
+        member = guild.get_member(bot.user.id)
+        if member and member.voice and member.voice.channel:
+            return member.voice.channel
+        return None
+
     def really_in_voice(guild):
         """Strict voice check: the voice client must report connected AND the
         gateway voice state of the bot must still point at a channel. A dead
         handshake or a UI disconnect leaves a stale VoiceClient behind that
         still claims to be connected — this catches both."""
         vc = guild.voice_client
-        if vc is None or not vc.is_connected():
-            return False
-        member = guild.get_member(bot.user.id)
-        return bool(member and member.voice and member.voice.channel)
+        return (vc is not None and vc.is_connected()
+                and gateway_voice_channel(guild) is not None)
 
     async def drop_stale_voice(guild):
-        """Force-disconnect a voice client that claims to be connected while
-        the gateway disagrees; the next play/start joins fresh. The leave is
-        flagged intentional: the voice-loyalty rejoin must not fight it."""
+        """Force-disconnect any voice client that cannot actually play:
+        either a stale handshake (websocket alive, gateway gone) or a fully
+        dead cached handle. Both block connect() with "Already connected to
+        a voice channel." until they are cleared. A semi-alive drop is
+        flagged intentional so the voice-loyalty rejoin does not fight it.
+        Returns the channel the gateway STILL shows the bot in after the
+        purge (the rejoin target that keeps the bot in the room across a
+        repair, None when it is nowhere in voice)."""
         vc = guild.voice_client
-        if vc is not None and vc.is_connected() and not really_in_voice(guild):
-            get_server_info(guild.id)['intentional_leave'] = True
+        if vc is not None and really_in_voice(guild):
+            return None  # healthy handle: keep carrying audio with it
+        stale = gateway_voice_channel(guild)
+        if vc is not None:
+            if vc.is_connected():
+                get_server_info(guild.id)['intentional_leave'] = True
             await vc.disconnect(force=True)
-            return True
-        return False
+        return stale
 
     def pick_voice_channel(guild, user):
         """Voice channel to auto-join when the panel starts playback: only the
@@ -968,8 +983,10 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
             raise HTTPException(status_code=409, detail="Already playing")
         voice_channel = None
         if not really_in_voice(guild):
-            await drop_stale_voice(guild)  # stale handshake cleanup
+            stale = await drop_stale_voice(guild)  # repair dead/stale handle
             voice_channel = pick_voice_channel(guild, admin)
+            if voice_channel is None:
+                voice_channel = stale  # repair in place instead of leaving
             if voice_channel is None:
                 raise HTTPException(
                     status_code=409,
@@ -1044,8 +1061,10 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
         # join by itself — the requester's voice channel if visible, else it
         # refuses. No more "use !play in Discord first".
         if not in_voice:
-            await drop_stale_voice(guild)
+            stale = await drop_stale_voice(guild)  # repair dead/stale handle
             voice_channel = pick_voice_channel(guild, admin)
+            if voice_channel is None:
+                voice_channel = stale  # repair in place instead of leaving
             if voice_channel is None:
                 raise HTTPException(
                     status_code=409,
@@ -1061,11 +1080,30 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
     @app.post("/api/guilds/{guild_id}/queue")
     async def enqueue_at(guild_id: int, body: QueueEnqueueRequest, admin: dict = Depends(_require_permission('queue'))):
         guild = get_guild(guild_id)
-        get_voice(guild)  # 409 if the bot is not connected
         # A positioned insert (Play next) reshapes the queue everyone shares,
         # so it gates on queue_manage; plain appends stay on queue.
         if body.position is not None and 'queue_manage' not in admin['permissions']:
             raise HTTPException(status_code=403, detail="Missing 'queue_manage' permission")
+        # Idle playback: the bot rolls the fresh row itself (same rules as
+        # /play - follows the requester's voice channel, never guesses). The
+        # channel check happens BEFORE the insert so a 409 never swallows a
+        # queued row; a running playlist loader already owns the rollout.
+        vc = get_voice(guild)
+        occupied = really_in_voice(guild) and (vc.is_playing() or vc.is_paused())
+        loading = get_server_info(guild_id).get('loading_task')
+        will_start = not occupied and not (loading and not loading.done())
+        start_channel = None
+        if will_start:
+            stale = await drop_stale_voice(guild)  # repair dead/stale handle
+            if not really_in_voice(guild):
+                start_channel = pick_voice_channel(guild, admin)
+                if start_channel is None:
+                    start_channel = stale  # repair in place instead of leaving
+                if start_channel is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Join a voice channel first: the bot only follows your account, it never picks a channel by guess"
+                    )
         stream_url, title, video_url, headers = await resolve_audio_info_async(body.query)
         if stream_url is None:
             raise HTTPException(status_code=400, detail="Unable to retrieve audio info")
@@ -1082,6 +1120,15 @@ def create_api_app(bot, resolve_audio_info_async, play_audio, play_queued_row, g
                 guild_id, body.position, title=title, webpage_url=video_url,
                 search_query=body.query, requester_id=admin['id']
             )
+        if will_start:
+            # Claim the head (this row, or the one the positioned insert put
+            # on top) and hand it to the normal playback pipeline.
+            row = await database.claim_next_track(guild_id)
+            if row is not None:
+                played = await play_queued_row(guild_id, row, autopilot=False, voice_channel=start_channel)
+                if not played:
+                    raise HTTPException(status_code=500, detail="Playback failed")
+                return {"queued": True, "row_id": row_id, "title": title, "playing": True}
         return {"queued": True, "row_id": row_id, "title": title}
 
     @app.patch("/api/guilds/{guild_id}/queue/{item_id}")

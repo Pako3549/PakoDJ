@@ -625,6 +625,41 @@ def get_notify_channel(guild, channel_id):
         return text_channel
     return None
 
+# The channel the gateway still shows the bot occupying, or None. The
+# VoiceClient can lie (dead handshake, lost handle); the gateway voice
+# state is what every user sees in the channel list.
+def bot_voice_channel(guild):
+    member = guild.get_member(bot.user.id)
+    if member and member.voice and member.voice.channel:
+        return member.voice.channel
+    return None
+
+# Strict voice check for the chat side: the handle must report connected
+# AND the gateway voice state must still point at a channel. A dead
+# handshake leaves a cached handle that makes every connect() raise
+# "Already connected to a voice channel." (discord.py refuses while ANY
+# VoiceClient object exists for the guild).
+def bot_voice_state_ok(guild):
+    vc = guild.voice_client
+    return (vc is not None and vc.is_connected()
+            and bot_voice_channel(guild) is not None)
+
+# Removes any unusable voice client (dead cached handle or stale handshake)
+# so the next connect() gets a fresh slot. Returns the channel the gateway
+# still shows the bot in AFTER the purge: the caller rejoins there so a
+# repair never leaves the room (None when the bot is nowhere in voice).
+async def purge_voice_handle(guild):
+    vc = guild.voice_client
+    if bot_voice_state_ok(guild):
+        return None  # healthy handle: keep carrying audio with it
+    stale = bot_voice_channel(guild)
+    if vc is not None:
+        if vc.is_connected():
+            # half-alive client: flag the leave so voice loyalty does not fight us
+            get_server_info(guild.id)['intentional_leave'] = True
+        await vc.disconnect(force=True)
+    return stale
+
 # Resolve and play a queued row.
 # Stream URLs are re-resolved just-in-time because they expire after a few
 # hours, and it makes the persisted queue shippable across restarts.
@@ -633,7 +668,10 @@ async def play_queued_row(guild_id, row, autopilot=True, voice_channel=None):
     if guild is None:
         return False
     
-    if autopilot and (guild.voice_client is None or not guild.voice_client.is_connected()):
+    # Wipe the queue only when the bot is gone under BOTH views: a dead
+    # handle while the gateway still shows the bot in the room is repaired
+    # in place by play_audio instead (nobody gets abandoned).
+    if autopilot and not bot_voice_state_ok(guild) and bot_voice_channel(guild) is None:
         # Bot is no longer in voice: nobody can hear the queue, wipe it
         await database.clear_queue(guild_id)
         await database.clear_now_playing(guild_id)
@@ -678,8 +716,13 @@ async def play_queued_row(guild_id, row, autopilot=True, voice_channel=None):
 # Function to play song track in voice channel
 async def play_audio(guild, notify_channel, stream_url, title, video_url, headers=None, collection_id=None, voice_channel=None):
     try:
+        # A dead handle must never survive into this block: it would make the
+        # connect() below raise "Already connected to a voice channel."
+        stale = await purge_voice_handle(guild)
         vc = guild.voice_client
-        if (vc is None or not vc.is_connected()):
+        if vc is None:
+            if voice_channel is None:
+                voice_channel = stale  # repair in place, where users see the bot
             if voice_channel is None:
                 raise RuntimeError("Bot is not in a voice channel")
             vc = await voice_channel.connect()
@@ -785,14 +828,16 @@ async def track(ctx):
 @bot.command(help = "Joins user's voice channel.")
 async def join(ctx):
     try:
-        if ctx.voice_client and ctx.voice_client.is_connected():
+        if bot_voice_state_ok(ctx.guild):
             await ctx.send("Already in a voice channel.")
-        elif ctx.author.voice:
-            channel = ctx.author.voice.channel
-            await channel.connect()
-            await ctx.send(f"Joined {channel}")
         else:
-            await ctx.send("You need to be in a voice channel to use this command.")
+            await purge_voice_handle(ctx.guild)
+            if ctx.author.voice:
+                channel = ctx.author.voice.channel
+                await channel.connect()
+                await ctx.send(f"Joined {channel}")
+            else:
+                await ctx.send("You need to be in a voice channel to use this command.")
     except Exception as e:
         print(f"Error in join: {e}")
 
@@ -1235,6 +1280,9 @@ async def on_voice_state_update(member, before, after):
 
     async def rejoin():
         try:
+            # A dead handle may still be cached at this point: clearing it
+            # first is what lets the fresh join succeed at all.
+            await purge_voice_handle(member.guild)
             await channel.connect()
             print(f"Voice auto-rejoined #{channel.name} in {member.guild.name}")
             # The drop killed the audio mid-track: resume the persisted queue.
