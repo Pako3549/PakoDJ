@@ -165,9 +165,17 @@ platform must serve a future web app with concurrent readers.
   greys it out.
 - **Voice loyalty:** the bot never leaves voice on its own. The last voice
   channel is remembered per guild; an unexpected drop (voice timeout, dead
-  handshake, kick) triggers a delayed auto-rejoin plus a resume of the
-  persisted queue. Deliberate leaves (panel Stop, `!stop`, stale-handle
-  cleanup) set an `intentional_leave` flag first so the rejoin stays out.
+  handshake, kick) triggers an auto-rejoin plus a resume of the persisted
+  queue. Deliberate leaves (panel Stop, `!stop`, stale-handle cleanup) set
+  an `intentional_leave` flag first so the rejoin stays out. The recovery
+  is regulated: one pending rejoin per guild (handshake churn fires a leave
+  event per failed attempt - unrestrained attempts became a 3s rejoin
+  storm during a Discord voice outage), first shot after the 3s grace,
+  then 6/12/24/48/60s backoff (reset by any successful join), a healthy
+  handle short-circuits the attempt (discord.py's internal reconnect
+  usually wins the race - the old unconditional connect failed with
+  "Already connected" on every hiccup), failures reschedule themselves
+  and log the exception type (dropped-websocket errors stringify empty).
 - **Open login, closed API:** any Discord account can complete the OAuth
   flow (the shared-server gate was dropped to make onboarding possible when
   the bot and the user share nothing yet). A new account starts with an
