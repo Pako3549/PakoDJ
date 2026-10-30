@@ -1240,10 +1240,10 @@ async def on_voice_state_update(member, before, after):
         # Joined (or moved): remember where it plays (and clear any leftover
         # intentional-leave flag so future drops are treated as drops).
         server_info['voice_channel_id'] = after.channel.id
+        server_info['voice_event_ts'] = time.time()
         server_info.pop('intentional_leave', None)
-        # Back in voice: the recovery loop restarts from a clean slate.
-        server_info.pop('rejoin_attempt', None)
         return
+    server_info['voice_event_ts'] = time.time()
     if server_info.pop('intentional_leave', False):
         # Deliberate leave: stay out and clean up, no rejoin.
         task = server_info.get('loading_task')
@@ -1261,8 +1261,7 @@ async def on_voice_state_update(member, before, after):
         # The queue stays in the DB: '!skip' can resume it once back in voice
         return
     # UNEXPECTED leave: the connection died on its own. Clean up the mirror,
-    # then go back to the last channel after a short grace period and resume
-    # the persisted queue - the bot stays with the user, devotedly.
+    # then let a QUIET caretaker watch the recovery.
     channel_id = server_info.get('voice_channel_id')
     task = server_info.get('loading_task')
     if task and not task.done():
@@ -1280,58 +1279,73 @@ async def on_voice_state_update(member, before, after):
     if channel is None:
         return
 
-    # Handshake churn fires one leave event per failed attempt: without a
-    # latch every event stacked ANOTHER rejoin (production ran a 3s rejoin
-    # storm during a Discord voice outage). A regulated single attempt is
-    # scheduled instead, with growing pauses.
-    pending = server_info.get('rejoin_task')
+    # discord.py's own voice machinery reconnects with its handshake retries
+    # and usually WINS - our attempts on top of it produced the churn seen in
+    # production (ours logged "Disconnected from voice by force..." cutting
+    # its half-open handshakes, then re-opened our own). The watchdog below
+    # therefore never races it:
+    # - it stays out while the gateway is churning (a voice-state event less
+    #   than 45s ago means an internal handshake is in flight);
+    # - it joins instantly the moment the handle is ENTIRELY gone (no handle
+    #   means nothing internal is mid-handshake and nothing can collide), and
+    #   after ten full minutes of an unreachable-but-present handle it
+    #   purges it once and joins;
+    # - wherever voice returns from (internal or ours), the persisted queue
+    #   is resumed if nothing plays.
+    handshaking = lambda: time.time() - server_info.get('voice_event_ts', 0) < 45
+    server_info['voice_drop_ts'] = time.time()
+
+    pending = server_info.get('watchdog')
     if pending is not None and not pending.done():
-        return  # a recovery is already scheduled: no stacking
+        return  # a caretaker is already on duty: no stacking
 
-    async def rejoin():
+    async def resume_queue():
+        vc = member.guild.voice_client
+        if vc is not None and not (vc.is_playing() or vc.is_paused()):
+            async with get_server_lock(member.guild.id):
+                row = await database.claim_next_track(member.guild.id)
+                if row is not None:
+                    await play_queued_row(member.guild.id, row, autopilot=False)
+
+    async def watchdog():
         guild = member.guild
-        try:
-            # discord.py's internal voice reconnect usually restores the
-            # connection long before our timer: an unconditional connect()
-            # used to fail loudly with "Already connected to a voice
-            # channel." on every small hiccup. A healthy handle means the
-            # recovery already happened - keep the room and move on.
-            if bot_voice_state_ok(guild):
-                server_info.pop('rejoin_attempt', None)
+        attempt = 0
+        delays = (3, 6, 10, 20, 40, 60)
+        while True:
+            try:
+                if server_info.get('intentional_leave'):
+                    return  # someone deliberately disconnected meanwhile
+                if bot_voice_state_ok(guild):
+                    # Voice is back (internal reconnect won, as usual).
+                    print(f"Voice recovered in {guild.name}, resuming anything left")
+                    await resume_queue()
+                    return
                 vc = guild.voice_client
-                if not (vc.is_playing() or vc.is_paused()):
-                    async with get_server_lock(guild.id):
-                        row = await database.claim_next_track(guild.id)
-                        if row is not None:
-                            await play_queued_row(guild.id, row, autopilot=False)
-                return
-            attempt = server_info.get('rejoin_attempt', 0)
-            server_info['rejoin_attempt'] = min(attempt + 1, 5)
-            # First shot keeps the 3s grace; retries back off 6/12/24/48/60s.
-            await asyncio.sleep(min(60, 3 * (2 ** attempt)))
-            if server_info.get('intentional_leave'):
-                return  # someone deliberately disconnected meanwhile
-            stale = await purge_voice_handle(guild)
-            target = channel or stale
-            if target is None:
-                print(f"Voice auto-rejoin skipped in {guild.name}: no channel left to join")
-                return
-            await target.connect()
-            server_info.pop('rejoin_attempt', None)
-            print(f"Voice auto-rejoined #{target.name} in {guild.name}")
-            vc = guild.voice_client
-            if not (vc.is_playing() or vc.is_paused()):
-                # The drop killed the audio mid-track: resume the queue.
-                async with get_server_lock(guild.id):
-                    row = await database.claim_next_track(guild.id)
-                    if row is not None:
-                        await play_queued_row(guild.id, row, autopilot=False)
-        except Exception as e:
-            # Dropped-websocket errors stringify empty: log the type too.
-            detail = str(e) or type(e).__name__
-            print(f"Voice auto-rejoin failed in {member.guild.name}: {detail}")
-            server_info['rejoin_task'] = asyncio.create_task(rejoin())
+                if vc is None:
+                    # No handle at all: nothing internal is mid-handshake,
+                    # a fresh join cannot collide with anyone.
+                    await channel.connect()
+                    print(f"Voice auto-rejoined #{channel.name} in {guild.name}")
+                    await resume_queue()
+                    return
+                # A live-but-silent handle gets minutes, not seconds: the
+                # internal machinery owns it and may still be retrying.
+                dropped = time.time() - server_info.get('voice_drop_ts', 0)
+                if not vc.is_connected() and not handshaking() and dropped > 600:
+                    stale = await purge_voice_handle(guild)
+                    target = channel or stale
+                    if target is not None:
+                        await target.connect()
+                        print(f"Voice auto-repaired #{target.name} in {guild.name}")
+                        await resume_queue()
+                        return
+            except Exception as e:
+                # Dropped-websocket errors stringify empty: log the type too.
+                detail = str(e) or type(e).__name__
+                print(f"Voice auto-rejoin failed in {guild.name}: {detail}")
+            await asyncio.sleep(delays[min(attempt, len(delays) - 1)])
+            attempt += 1
 
-    server_info['rejoin_task'] = asyncio.create_task(rejoin())
+    server_info['watchdog'] = asyncio.create_task(watchdog())
 
 bot.run(os.getenv('token'))

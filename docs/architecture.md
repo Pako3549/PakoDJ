@@ -165,17 +165,23 @@ platform must serve a future web app with concurrent readers.
   greys it out.
 - **Voice loyalty:** the bot never leaves voice on its own. The last voice
   channel is remembered per guild; an unexpected drop (voice timeout, dead
-  handshake, kick) triggers an auto-rejoin plus a resume of the persisted
-  queue. Deliberate leaves (panel Stop, `!stop`, stale-handle cleanup) set
-  an `intentional_leave` flag first so the rejoin stays out. The recovery
-  is regulated: one pending rejoin per guild (handshake churn fires a leave
-  event per failed attempt - unrestrained attempts became a 3s rejoin
-  storm during a Discord voice outage), first shot after the 3s grace,
-  then 6/12/24/48/60s backoff (reset by any successful join), a healthy
-  handle short-circuits the attempt (discord.py's internal reconnect
-  usually wins the race - the old unconditional connect failed with
-  "Already connected" on every hiccup), failures reschedule themselves
-  and log the exception type (dropped-websocket errors stringify empty).
+  handshake, kick) hands recovery over to a quiet watchdog. Discord.py's
+  internal voice machinery reconnects with its own handshake retries and
+  usually wins - streaming our own joins on top of it produced production
+  churn (a 3s rejoin storm, then forced disconnects cutting half-open
+  handshakes with "Disconnected from voice by force..."). The watchdog
+  therefore: stays out while the gateway is churning (a voice-state event
+  under 45s old means an internal handshake is in flight); joins INSTANTLY
+  the moment the VoiceClient is entirely gone (nothing internal is
+  mid-handshake then, nobody can collide - this is the case after the
+  internal machinery gives up with close code 1000), with fast watchdog
+  ticks 3/6/10/20/40/60s so the fresh join lands in seconds; after ten
+  full minutes of an unreachable-but-present handle it purges it once and
+  joins; resumes the persisted queue whenever voice is back, whichever
+  side brought it back; logs the exception type (dropped-websocket errors
+  stringify empty). Deliberate leaves (panel Stop, `!stop`, stale-handle
+  cleanup) set an `intentional_leave` flag so the watchdog stays out; the
+  queue survives in the DB and resumes on return.
 - **Open login, closed API:** any Discord account can complete the OAuth
   flow (the shared-server gate was dropped to make onboarding possible when
   the bot and the user share nothing yet). A new account starts with an
